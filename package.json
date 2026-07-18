@@ -1,0 +1,159 @@
+{
+  "name": "free-whisper-llm",
+  "displayName": "Voice Agent",
+  "description": "Local Whisper voice agent for VS Code and Cursor — plan, ask, edit code, or run shell commands by speaking.",
+  "version": "0.1.0",
+  "publisher": "free-whisper-llm",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Machine Learning"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "voiceAgent.talk",
+        "title": "Voice Agent: Talk",
+        "icon": "$(mic)"
+      },
+      {
+        "command": "voiceAgent.stop",
+        "title": "Voice Agent: Stop Recording",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "voiceAgent.openPanel",
+        "title": "Voice Agent: Open Panel"
+      },
+      {
+        "command": "voiceAgent.setupWhisper",
+        "title": "Voice Agent: Setup Whisper"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "voiceAgent.talk",
+        "key": "ctrl+shift+space",
+        "mac": "cmd+shift+space",
+        "when": "!voiceAgent.recording"
+      },
+      {
+        "command": "voiceAgent.stop",
+        "key": "ctrl+shift+space",
+        "mac": "cmd+shift+space",
+        "when": "voiceAgent.recording"
+      },
+      {
+        "command": "voiceAgent.stop",
+        "key": "escape",
+        "when": "voiceAgent.recording"
+      }
+    ],
+    "configuration": {
+      "title": "Voice Agent",
+      "properties": {
+        "voiceAgent.whisper.model": {
+          "type": "string",
+          "default": "base",
+          "enum": [
+            "tiny",
+            "base",
+            "small",
+            "medium",
+            "large-v3"
+          ],
+          "description": "Local Whisper model size (faster-whisper)."
+        },
+        "voiceAgent.whisper.language": {
+          "type": "string",
+          "default": "pt",
+          "enum": [
+            "pt",
+            "en",
+            "es",
+            "fr",
+            "de",
+            "auto"
+          ],
+          "description": "Speech recognition language. Use auto to detect."
+        },
+        "voiceAgent.whisper.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "Python executable for Whisper. Leave as python3 to auto-use extension/.venv after Setup Whisper (PEP 668 safe)."
+        },
+        "voiceAgent.whisper.scriptPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional override path to whisper_transcribe.py. Empty = bundled script."
+        },
+        "voiceAgent.llm.provider": {
+          "type": "string",
+          "default": "ollama",
+          "enum": [
+            "ollama",
+            "openai",
+            "anthropic"
+          ],
+          "description": "LLM provider for intent routing and handlers."
+        },
+        "voiceAgent.llm.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:11434",
+          "description": "Base URL for Ollama or OpenAI-compatible APIs."
+        },
+        "voiceAgent.llm.model": {
+          "type": "string",
+          "default": "llama3.2",
+          "description": "Model name (e.g. llama3.2, gpt-4o-mini, claude-sonnet-4-20250514)."
+        },
+        "voiceAgent.llm.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for OpenAI or Anthropic. Leave empty for Ollama."
+        },
+        "voiceAgent.shell.confirm": {
+          "type": "boolean",
+          "default": true,
+          "description": "Always ask before running shell commands."
+        },
+        "voiceAgent.edit.confirmMultiFile": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask before applying edits that touch more than one file."
+        },
+        "voiceAgent.confidenceThreshold": {
+          "type": "number",
+          "default": 0.55,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Below this confidence, intent falls back to ask."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-dependencies",
+    "lint": "tsc -p ./ --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.32.0",
+    "typescript": "^5.4.0"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  }
+}

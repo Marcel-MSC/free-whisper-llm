@@ -1,0 +1,14 @@
+.vscode/**
+.vscode-test/**
+src/**
+.gitignore
+tsconfig.json
+**/*.map
+**/*.ts
+!out/**/*.js
+node_modules/**
+.whisper-models/**
+.venv/**
+venv/**
+*.vsix
+**/.DS_Store

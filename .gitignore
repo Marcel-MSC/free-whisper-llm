@@ -1,0 +1,13 @@
+node_modules/
+out/
+*.vsix
+.vscode-test/
+dist/
+*.wav
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+.whisper-models/
+.venv/
+venv/
