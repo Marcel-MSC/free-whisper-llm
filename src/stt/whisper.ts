@@ -17,6 +17,18 @@ export interface TranscribeResult {
   language?: string;
 }
 
+/** Stable user data dir — survives VSIX reinstalls (extension folder does not keep .venv). */
+export function sharedDataDir(): string {
+  return path.join(os.homedir(), ".local", "share", "voice-agent");
+}
+
+export function sharedVenvPython(): string {
+  if (process.platform === "win32") {
+    return path.join(sharedDataDir(), ".venv", "Scripts", "python.exe");
+  }
+  return path.join(sharedDataDir(), ".venv", "bin", "python");
+}
+
 export function resolveScriptPath(extensionPath: string): string {
   const config = getConfig();
   if (config.scriptPath.trim()) {
@@ -25,7 +37,14 @@ export function resolveScriptPath(extensionPath: string): string {
   return path.join(extensionPath, "scripts", "whisper_transcribe.py");
 }
 
-/** Prefer extension .venv (PEP 668 safe) unless the user set an explicit interpreter. */
+/**
+ * Prefer (in order):
+ * 1. explicit voiceAgent.whisper.pythonPath
+ * 2. ~/.local/share/voice-agent/.venv (shared, for VSIX installs)
+ * 3. extensionPath/.venv (dev / local clone)
+ * 4. workspace .venv if open
+ * 5. python3
+ */
 export function resolvePythonPath(extensionPath: string): string {
   const config = getConfig();
   const configured = config.pythonPath.trim();
@@ -35,14 +54,29 @@ export function resolvePythonPath(extensionPath: string): string {
     return configured;
   }
 
-  const venvUnix = path.join(extensionPath, ".venv", "bin", "python");
-  const venvWin = path.join(extensionPath, ".venv", "Scripts", "python.exe");
-  if (process.platform === "win32" && fs.existsSync(venvWin)) {
-    return venvWin;
+  const candidates: string[] = [sharedVenvPython()];
+
+  if (process.platform === "win32") {
+    candidates.push(path.join(extensionPath, ".venv", "Scripts", "python.exe"));
+  } else {
+    candidates.push(path.join(extensionPath, ".venv", "bin", "python"));
   }
-  if (fs.existsSync(venvUnix)) {
-    return venvUnix;
+
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  for (const folder of folders) {
+    if (process.platform === "win32") {
+      candidates.push(path.join(folder.uri.fsPath, ".venv", "Scripts", "python.exe"));
+    } else {
+      candidates.push(path.join(folder.uri.fsPath, ".venv", "bin", "python"));
+    }
   }
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
   return configured || "python3";
 }
 
@@ -60,6 +94,10 @@ export async function setupWhisper(extensionPath: string): Promise<string> {
   const config = getConfig();
   const script = resolveScriptPath(extensionPath);
   const setupSh = path.join(extensionPath, "scripts", "setup_whisper.sh");
+  const dataDir = sharedDataDir();
+  const venvDir = path.join(dataDir, ".venv");
+
+  await fs.promises.mkdir(dataDir, { recursive: true });
 
   if (process.platform !== "win32" && fs.existsSync(setupSh)) {
     const output = await runCommand(
@@ -69,31 +107,26 @@ export async function setupWhisper(extensionPath: string): Promise<string> {
       600_000,
       {
         VOICE_AGENT_PYTHON: config.pythonPath.trim() || "python3",
+        VOICE_AGENT_VENV: venvDir,
         WHISPER_MODEL: config.whisperModel,
       }
     );
-    return output.trim() || "Whisper setup completed.";
+    return (
+      output.trim() ||
+      `Whisper setup completed. Using ${sharedVenvPython()}`
+    );
   }
 
-  // Windows / fallback: create venv via system Python, then pip install
+  // Windows / fallback: create shared venv via system Python, then pip install
   const systemPython = config.pythonPath.trim() || "python3";
-  const venvDir = path.join(extensionPath, ".venv");
-  const venvPython =
-    process.platform === "win32"
-      ? path.join(venvDir, "Scripts", "python.exe")
-      : path.join(venvDir, "bin", "python");
+  const venvPython = sharedVenvPython();
 
   if (!fs.existsSync(venvPython)) {
     await runPython(systemPython, ["-m", "venv", venvDir], extensionPath, 120_000);
   }
 
   const requirements = path.join(extensionPath, "scripts", "requirements.txt");
-  await runPython(
-    venvPython,
-    ["-m", "pip", "install", "-U", "pip"],
-    extensionPath,
-    180_000
-  );
+  await runPython(venvPython, ["-m", "pip", "install", "-U", "pip"], extensionPath, 180_000);
   await runPython(
     venvPython,
     ["-m", "pip", "install", "-r", requirements],
@@ -111,10 +144,7 @@ export async function setupWhisper(extensionPath: string): Promise<string> {
     extensionPath,
     600_000
   );
-  return (
-    output.trim() ||
-    `Whisper setup completed. Using ${venvPython}`
-  );
+  return output.trim() || `Whisper setup completed. Using ${venvPython}`;
 }
 
 export async function transcribeWav(

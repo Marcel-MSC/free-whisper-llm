@@ -2,7 +2,7 @@
   "name": "free-whisper-llm",
   "displayName": "Voice Agent",
   "description": "Local Whisper voice agent for VS Code and Cursor — plan, ask, edit code, or run shell commands by speaking.",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "publisher": "free-whisper-llm",
   "engines": {
     "vscode": "^1.85.0"
@@ -92,6 +92,21 @@
           "type": "string",
           "default": "",
           "description": "Optional override path to whisper_transcribe.py. Empty = bundled script."
+        },
+        "voiceAgent.audio.captureMode": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "webview",
+            "native"
+          ],
+          "enumDescriptions": [
+            "Linux/WSL uses PulseAudio (parecord); Windows/macOS uses webview mic. Falls back if one fails.",
+            "Browser getUserMedia in the panel (needs Cursor/Windows mic permission).",
+            "Record via parecord/arecord/ffmpeg on the extension host (best for WSL)."
+          ],
+          "description": "How to capture microphone audio."
         },
         "voiceAgent.llm.provider": {
           "type": "string",

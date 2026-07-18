@@ -23,15 +23,15 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("voiceAgent.talk", async () => {
       const panel = VoiceAgentPanel.show(context, setRec);
       if (panel.isRecording()) {
-        panel.stopRecording();
+        await panel.stopRecording();
       } else {
-        panel.startRecording();
+        await panel.startRecording();
       }
     }),
-    vscode.commands.registerCommand("voiceAgent.stop", () => {
+    vscode.commands.registerCommand("voiceAgent.stop", async () => {
       const panel = VoiceAgentPanel.show(context, setRec);
       if (panel.isRecording()) {
-        panel.stopRecording();
+        await panel.stopRecording();
       }
     }),
     vscode.commands.registerCommand("voiceAgent.setupWhisper", async () => {

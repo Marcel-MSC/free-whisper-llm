@@ -30,7 +30,31 @@ chmod +x scripts/setup_whisper.sh
 
 Ou, com a extensão já instalada: Command Palette → **Voice Agent: Setup Whisper**.
 
-Isso cria `.venv`, instala `faster-whisper` lá e baixa o modelo (`base` por padrão). A extensão usa `.venv/bin/python` automaticamente quando `voiceAgent.whisper.pythonPath` está em `python3`.
+Isso cria um venv em `~/.local/share/voice-agent/.venv` (sobrevive a reinstalação do `.vsix`), instala `faster-whisper` e baixa o modelo (`base` por padrão).
+
+**Importante:** depois de instalar o VSIX, rode **Voice Agent: Setup Whisper** uma vez. O `.venv` do clone do git **não** é o mesmo caminho da extensão instalada.
+
+## Microfone no WSL / Cursor Remote
+
+No **Cursor + WSL**, o webview do painel roda no Windows e o `getUserMedia` costuma falhar com `Permission denied`.
+
+A extensão usa captura **nativa no Linux** (PulseAudio via WSLg) por padrão em `linux`:
+
+```bash
+sudo apt install pulseaudio-utils alsa-utils
+# opcional: listar fontes
+PULSE_SERVER=unix:/mnt/wslg/PulseServer pactl list sources short
+```
+
+Settings: `voiceAgent.audio.captureMode`
+
+| Valor | Comportamento |
+|-------|----------------|
+| `auto` (default) | Linux/WSL → `parecord`/`ffmpeg`/`arecord`; Windows/macOS → webview |
+| `native` | Sempre extension host (melhor no WSL) |
+| `webview` | Sempre `getUserMedia` no painel |
+
+Se o webview falhar, a extensão tenta o fallback nativo automaticamente.
 
 ## Desenvolvimento
 
@@ -52,7 +76,8 @@ npm run package
 1. Configure o LLM em **Settings → Voice Agent** (`voiceAgent.llm.*`)
 2. `Ctrl+Shift+Space` / `Cmd+Shift+Space` ou clique no ícone **mic** na status bar
 3. Fale → solte / clique de novo para parar
-4. Confirme edits multi-arquivo e comandos de shell quando pedido
+4. **Revise o transcript** (edite se precisar) → **Send to agent** (ou `Ctrl+Enter`)
+5. Confirme edits multi-arquivo e comandos de shell quando pedido
 
 Comandos:
 
@@ -68,6 +93,7 @@ Comandos:
 | `voiceAgent.whisper.model` | `base` | tiny / base / small / medium / large-v3 |
 | `voiceAgent.whisper.language` | `pt` | Idioma do STT (`auto` para detectar) |
 | `voiceAgent.whisper.pythonPath` | `python3` | Auto-usa `.venv` se existir; senão `python3` |
+| `voiceAgent.audio.captureMode` | `auto` | `auto` / `webview` / `native` (WSL: use native) |
 | `voiceAgent.llm.provider` | `ollama` | ollama / openai / anthropic |
 | `voiceAgent.llm.baseUrl` | `http://127.0.0.1:11434` | Ollama ou OpenAI-compatible |
 | `voiceAgent.llm.model` | `llama3.2` | Nome do modelo |
@@ -78,9 +104,9 @@ Comandos:
 ## Arquitetura (MVP)
 
 ```
-Mic (webview) → WAV → scripts/whisper_transcribe.py
-                     → intent router (LLM JSON)
-                     → plan | ask | edit | shell
+Mic (webview ou parecord no WSL) → WAV → scripts/whisper_transcribe.py
+                                      → intent router (LLM JSON)
+                                      → plan | ask | edit | shell
 ```
 
 ## Limitações do MVP

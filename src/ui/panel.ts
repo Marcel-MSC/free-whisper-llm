@@ -6,11 +6,22 @@ import {
   cleanupTemp,
   WhisperError,
 } from "../stt/whisper";
+import {
+  cancelNativeCapture,
+  defaultCaptureMode,
+  isNativeCaptureActive,
+  probeNativeCapture,
+  startNativeCapture,
+  stopNativeCapture,
+  NativeCaptureError,
+} from "../audio/nativeCapture";
+import { getConfig } from "../config";
 
 export type PanelStatus =
   | "idle"
   | "recording"
   | "transcribing"
+  | "review"
   | "routing"
   | "running"
   | "error"
@@ -26,6 +37,8 @@ interface PanelState {
   error: string;
 }
 
+type ActiveMode = "webview" | "native";
+
 export class VoiceAgentPanel {
   public static readonly viewType = "voiceAgent.panel";
   private static current: VoiceAgentPanel | undefined;
@@ -35,6 +48,7 @@ export class VoiceAgentPanel {
   private readonly extensionPath: string;
   private disposables: vscode.Disposable[] = [];
   private recording = false;
+  private activeMode: ActiveMode = "webview";
   private onRecordingChange?: (recording: boolean) => void;
 
   private constructor(
@@ -51,7 +65,7 @@ export class VoiceAgentPanel {
     this.panel.webview.html = this.getHtml();
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
     this.panel.webview.onDidReceiveMessage(
-      (msg) => this.onMessage(msg),
+      (msg) => void this.onMessage(msg),
       null,
       this.disposables
     );
@@ -89,7 +103,36 @@ export class VoiceAgentPanel {
     return VoiceAgentPanel.current;
   }
 
-  public startRecording(): void {
+  public async startRecording(): Promise<void> {
+    const config = getConfig();
+    const preferred = defaultCaptureMode(config.audioCaptureMode);
+    const native = await probeNativeCapture();
+
+    if (preferred === "native" && native.available) {
+      await this.startNative();
+      return;
+    }
+
+    if (preferred === "native" && !native.available) {
+      // Fall back to webview with a clear hint if it also fails
+      this.activeMode = "webview";
+      this.recording = true;
+      this.onRecordingChange?.(true);
+      this.post({ type: "startRecording" });
+      this.updateState({
+        status: "recording",
+        transcript: "",
+        intent: "",
+        confidence: 0,
+        summary: "",
+        result: "",
+        error: "",
+      });
+      return;
+    }
+
+    // webview preferred (or auto on non-Linux)
+    this.activeMode = "webview";
     this.recording = true;
     this.onRecordingChange?.(true);
     this.post({ type: "startRecording" });
@@ -104,12 +147,83 @@ export class VoiceAgentPanel {
     });
   }
 
-  public stopRecording(): void {
+  public async stopRecording(): Promise<void> {
+    if (this.activeMode === "native" || isNativeCaptureActive()) {
+      await this.stopNative();
+      return;
+    }
     this.post({ type: "stopRecording" });
   }
 
   public isRecording(): boolean {
     return this.recording;
+  }
+
+  private async startNative(): Promise<void> {
+    try {
+      const { backend } = await startNativeCapture();
+      this.activeMode = "native";
+      this.recording = true;
+      this.onRecordingChange?.(true);
+      this.post({ type: "nativeRecording", active: true });
+      this.updateState({
+        status: "recording",
+        transcript: "",
+        intent: "",
+        confidence: 0,
+        summary: `Native mic (${backend}) — speak, then click stop`,
+        result: "",
+        error: "",
+      });
+    } catch (err) {
+      const message =
+        err instanceof NativeCaptureError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      this.recording = false;
+      this.onRecordingChange?.(false);
+      this.updateState({
+        status: "error",
+        transcript: "",
+        intent: "",
+        confidence: 0,
+        summary: "",
+        result: "",
+        error: message,
+      });
+      void vscode.window.showErrorMessage(`Voice Agent: ${message}`);
+    }
+  }
+
+  private async stopNative(): Promise<void> {
+    try {
+      this.post({ type: "nativeRecording", active: false });
+      const wavPath = await stopNativeCapture();
+      this.recording = false;
+      this.onRecordingChange?.(false);
+      await this.handleWavPath(wavPath);
+    } catch (err) {
+      this.recording = false;
+      this.onRecordingChange?.(false);
+      const message =
+        err instanceof NativeCaptureError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      this.updateState({
+        status: "error",
+        transcript: "",
+        intent: "",
+        confidence: 0,
+        summary: "",
+        result: "",
+        error: message,
+      });
+      void vscode.window.showErrorMessage(`Voice Agent: ${message}`);
+    }
   }
 
   private async onMessage(message: unknown): Promise<void> {
@@ -127,14 +241,45 @@ export class VoiceAgentPanel {
         this.onRecordingChange?.(true);
         break;
       case "recordingStopped":
-        this.recording = false;
-        this.onRecordingChange?.(false);
+        if (this.activeMode === "webview") {
+          this.recording = false;
+          this.onRecordingChange?.(false);
+        }
         break;
       case "audio":
         if (typeof msg.base64Wav === "string") {
           await this.handleAudio(msg.base64Wav);
         }
         break;
+      case "micFailed": {
+        // Webview getUserMedia failed — try native (WSL/Pulse) automatically
+        const reason =
+          typeof msg.message === "string" ? msg.message : "Permission denied";
+        const native = await probeNativeCapture();
+        if (native.available) {
+          void vscode.window.showInformationMessage(
+            `Webview mic failed (${reason}). Using native capture (${native.backend}).`
+          );
+          await this.startNative();
+        } else {
+          this.recording = false;
+          this.onRecordingChange?.(false);
+          this.updateState({
+            status: "error",
+            transcript: "",
+            intent: "",
+            confidence: 0,
+            summary: "",
+            result: "",
+            error:
+              `Microphone access failed: ${reason}\n\n` +
+              `Native fallback unavailable: ${native.detail}\n` +
+              `On WSL: sudo apt install pulseaudio-utils\n` +
+              `Also allow Cursor mic in Windows Privacy settings.`,
+          });
+        }
+        break;
+      }
       case "error":
         this.recording = false;
         this.onRecordingChange?.(false);
@@ -150,10 +295,32 @@ export class VoiceAgentPanel {
         break;
       case "toggle":
         if (this.recording) {
-          this.stopRecording();
+          await this.stopRecording();
         } else {
-          this.startRecording();
+          await this.startRecording();
         }
+        break;
+      case "requestNative":
+        await this.startNative();
+        break;
+      case "stopNative":
+        await this.stopNative();
+        break;
+      case "sendTranscript":
+        if (typeof msg.text === "string") {
+          await this.runWithTranscript(msg.text);
+        }
+        break;
+      case "discardTranscript":
+        this.updateState({
+          status: "idle",
+          transcript: "",
+          intent: "",
+          confidence: 0,
+          summary: "",
+          result: "",
+          error: "",
+        });
         break;
     }
   }
@@ -175,8 +342,66 @@ export class VoiceAgentPanel {
       });
 
       wavPath = await writeWavTemp(base64Wav);
-      const { text } = await transcribeWav(this.extensionPath, wavPath);
+      await this.transcribeAndRun(wavPath);
+    } catch (err) {
+      this.showErr(err);
+    } finally {
+      if (wavPath) {
+        await cleanupTemp(wavPath);
+      }
+    }
+  }
 
+  private async handleWavPath(wavPath: string): Promise<void> {
+    try {
+      this.updateState({
+        status: "transcribing",
+        transcript: "",
+        intent: "",
+        confidence: 0,
+        summary: "",
+        result: "",
+        error: "",
+      });
+      await this.transcribeAndRun(wavPath);
+    } catch (err) {
+      this.showErr(err);
+    } finally {
+      await cleanupTemp(wavPath);
+    }
+  }
+
+  private async transcribeAndRun(wavPath: string): Promise<void> {
+    const { text } = await transcribeWav(this.extensionPath, wavPath);
+
+    // Pause for user review/edit before calling the LLM
+    this.updateState({
+      status: "review",
+      transcript: text,
+      intent: "",
+      confidence: 0,
+      summary: "Review the transcript, edit if needed, then Send.",
+      result: "",
+      error: "",
+    });
+  }
+
+  private async runWithTranscript(raw: string): Promise<void> {
+    const text = raw.trim();
+    if (!text) {
+      this.updateState({
+        status: "error",
+        transcript: "",
+        intent: "",
+        confidence: 0,
+        summary: "",
+        result: "",
+        error: "Transcript is empty. Record again or type something before Send.",
+      });
+      return;
+    }
+
+    try {
       this.updateState({
         status: "routing",
         transcript: text,
@@ -209,27 +434,27 @@ export class VoiceAgentPanel {
         error: "",
       });
     } catch (err) {
-      const message =
-        err instanceof WhisperError
-          ? err.message
-          : err instanceof Error
-            ? err.message
-            : String(err);
-      this.updateState({
-        status: "error",
-        transcript: "",
-        intent: "",
-        confidence: 0,
-        summary: "",
-        result: "",
-        error: message,
-      });
-      void vscode.window.showErrorMessage(`Voice Agent: ${message}`);
-    } finally {
-      if (wavPath) {
-        await cleanupTemp(wavPath);
-      }
+      this.showErr(err);
     }
+  }
+
+  private showErr(err: unknown): void {
+    const message =
+      err instanceof WhisperError || err instanceof NativeCaptureError
+        ? err.message
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    this.updateState({
+      status: "error",
+      transcript: "",
+      intent: "",
+      confidence: 0,
+      summary: "",
+      result: "",
+      error: message,
+    });
+    void vscode.window.showErrorMessage(`Voice Agent: ${message}`);
   }
 
   private updateState(state: PanelState): void {
@@ -244,6 +469,7 @@ export class VoiceAgentPanel {
     VoiceAgentPanel.current = undefined;
     this.recording = false;
     this.onRecordingChange?.(false);
+    void cancelNativeCapture();
     while (this.disposables.length) {
       const d = this.disposables.pop();
       d?.dispose();
@@ -287,6 +513,11 @@ export class VoiceAgentPanel {
   <section class="card">
     <h2>Transcript</h2>
     <pre id="transcript" class="block empty">—</pre>
+    <textarea id="transcriptEdit" class="transcript-edit hidden" rows="4" placeholder="Transcript will appear here…"></textarea>
+    <div id="reviewActions" class="review-actions hidden">
+      <button id="sendBtn" class="btn primary" type="button">Send to agent</button>
+      <button id="discardBtn" class="btn" type="button">Discard</button>
+    </div>
   </section>
 
   <section class="card">

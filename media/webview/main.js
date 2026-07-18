@@ -5,6 +5,10 @@
   const micLabel = document.getElementById("micLabel");
   const statusEl = document.getElementById("status");
   const transcriptEl = document.getElementById("transcript");
+  const transcriptEdit = document.getElementById("transcriptEdit");
+  const reviewActions = document.getElementById("reviewActions");
+  const sendBtn = document.getElementById("sendBtn");
+  const discardBtn = document.getElementById("discardBtn");
   const intentMetaEl = document.getElementById("intentMeta");
   const summaryEl = document.getElementById("summary");
   const resultEl = document.getElementById("result");
@@ -16,6 +20,8 @@
   let processor = null;
   let source = null;
   let recording = false;
+  let nativeMode = false;
+  let reviewMode = false;
   const buffers = [];
   let sampleRate = 48000;
 
@@ -30,10 +36,34 @@
     micLabel.textContent = on ? "Listening… click to stop" : "Click to talk";
   }
 
+  function setReviewUi(on, text) {
+    reviewMode = on;
+    if (on) {
+      transcriptEl.classList.add("hidden");
+      transcriptEdit.classList.remove("hidden");
+      reviewActions.classList.remove("hidden");
+      transcriptEdit.value = text || "";
+      transcriptEdit.focus();
+      transcriptEdit.setSelectionRange(
+        transcriptEdit.value.length,
+        transcriptEdit.value.length
+      );
+    } else {
+      transcriptEdit.classList.add("hidden");
+      reviewActions.classList.add("hidden");
+      transcriptEl.classList.remove("hidden");
+    }
+  }
+
   async function startRecording() {
     if (recording) {
       return;
     }
+    if (nativeMode) {
+      setRecordingUi(true);
+      return;
+    }
+
     buffers.length = 0;
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -59,16 +89,21 @@
       setRecordingUi(true);
       vscode.postMessage({ type: "recordingStarted" });
     } catch (err) {
+      setRecordingUi(false);
       vscode.postMessage({
-        type: "error",
-        message:
-          "Microphone access failed: " +
-          (err && err.message ? err.message : String(err)),
+        type: "micFailed",
+        message: err && err.message ? err.message : String(err),
       });
     }
   }
 
   function stopRecording() {
+    if (nativeMode) {
+      setRecordingUi(false);
+      vscode.postMessage({ type: "stopNative" });
+      return;
+    }
+
     if (!recording && !mediaStream) {
       return;
     }
@@ -181,11 +216,37 @@
     return btoa(binary);
   }
 
+  function sendTranscript() {
+    const text = (transcriptEdit.value || "").trim();
+    setReviewUi(false);
+    setText(transcriptEl, text, !text);
+    vscode.postMessage({ type: "sendTranscript", text: text });
+  }
+
   micBtn.addEventListener("click", () => {
     if (recording) {
       stopRecording();
+    } else if (nativeMode) {
+      vscode.postMessage({ type: "requestNative" });
     } else {
-      startRecording();
+      vscode.postMessage({ type: "toggle" });
+    }
+  });
+
+  sendBtn.addEventListener("click", () => {
+    sendTranscript();
+  });
+
+  discardBtn.addEventListener("click", () => {
+    setReviewUi(false);
+    setText(transcriptEl, "", true);
+    vscode.postMessage({ type: "discardTranscript" });
+  });
+
+  transcriptEdit.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      sendTranscript();
     }
   });
 
@@ -195,13 +256,30 @@
       return;
     }
     if (msg.type === "startRecording") {
+      nativeMode = false;
       startRecording();
     } else if (msg.type === "stopRecording") {
       stopRecording();
+    } else if (msg.type === "nativeRecording") {
+      nativeMode = !!msg.active;
+      setRecordingUi(!!msg.active);
     } else if (msg.type === "state" && msg.state) {
       const s = msg.state;
       statusEl.textContent = s.status || "idle";
-      setText(transcriptEl, s.transcript, !s.transcript);
+
+      if (s.status === "review") {
+        setReviewUi(true, s.transcript || "");
+      } else {
+        if (reviewMode && s.status !== "routing" && s.status !== "running") {
+          setReviewUi(false);
+        } else if (s.status === "routing" || s.status === "running" || s.status === "done") {
+          setReviewUi(false);
+          setText(transcriptEl, s.transcript, !s.transcript);
+        } else if (s.status !== "review") {
+          setText(transcriptEl, s.transcript, !s.transcript);
+        }
+      }
+
       if (s.intent) {
         intentMetaEl.textContent =
           s.intent +
@@ -221,7 +299,6 @@
       if (s.status === "recording") {
         setRecordingUi(true);
       } else if (s.status !== "idle") {
-        // keep mic label accurate when not actively recording
         if (!recording) {
           micLabel.textContent = "Click to talk";
           micBtn.classList.remove("recording");

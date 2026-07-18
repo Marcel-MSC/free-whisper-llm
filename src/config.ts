@@ -2,12 +2,14 @@ import * as vscode from "vscode";
 
 export type LlmProvider = "ollama" | "openai" | "anthropic";
 export type WhisperLanguage = "pt" | "en" | "es" | "fr" | "de" | "auto";
+export type AudioCaptureMode = "auto" | "webview" | "native";
 
 export interface VoiceAgentConfig {
   whisperModel: string;
   whisperLanguage: WhisperLanguage;
   pythonPath: string;
   scriptPath: string;
+  audioCaptureMode: AudioCaptureMode;
   llmProvider: LlmProvider;
   llmBaseUrl: string;
   llmModel: string;
@@ -24,6 +26,7 @@ export function getConfig(): VoiceAgentConfig {
     whisperLanguage: cfg.get<WhisperLanguage>("whisper.language", "pt"),
     pythonPath: cfg.get<string>("whisper.pythonPath", "python3"),
     scriptPath: cfg.get<string>("whisper.scriptPath", ""),
+    audioCaptureMode: cfg.get<AudioCaptureMode>("audio.captureMode", "auto"),
     llmProvider: cfg.get<LlmProvider>("llm.provider", "ollama"),
     llmBaseUrl: cfg.get<string>("llm.baseUrl", "http://127.0.0.1:11434"),
     llmModel: cfg.get<string>("llm.model", "llama3.2"),
