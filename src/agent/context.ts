@@ -1,5 +1,18 @@
 import * as vscode from "vscode";
 import * as path from "path";
+import {
+  extractSearchTerms,
+  readWorkspaceFile,
+  redactSecrets,
+  searchWorkspace,
+  SearchHit,
+} from "./search";
+import {
+  canonicalizePath,
+  isPathInsideRoots,
+  resolveUnderRoots,
+} from "./pathSafety";
+import { hasFeature } from "../license/entitlements";
 
 export interface WorkspaceContext {
   workspaceFolders: string[];
@@ -8,46 +21,93 @@ export interface WorkspaceContext {
   selection?: string;
   activeFileExcerpt?: string;
   shellKind: "bash" | "powershell" | "cmd";
+  searchHits?: SearchHit[];
+  relatedFiles?: Array<{ path: string; content: string; truncated: boolean }>;
+  proContext: boolean;
 }
 
 const MAX_EXCERPT = 6000;
 const MAX_SELECTION = 4000;
 
-export async function gatherContext(): Promise<WorkspaceContext> {
+export async function gatherContext(
+  transcript?: string
+): Promise<WorkspaceContext> {
   const folders = vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [];
   const editor = vscode.window.activeTextEditor;
   const shellKind = detectShell();
+  const proContext = await hasFeature("codebaseSearch");
 
-  if (!editor) {
-    return { workspaceFolders: folders, shellKind };
-  }
-
-  const doc = editor.document;
-  const selection = editor.selection.isEmpty
-    ? undefined
-    : doc.getText(editor.selection).slice(0, MAX_SELECTION);
-
-  let activeFileExcerpt: string | undefined;
-  const full = doc.getText();
-  if (full.length <= MAX_EXCERPT) {
-    activeFileExcerpt = full;
-  } else {
-    const mid = editor.selection.active.line;
-    const start = Math.max(0, mid - 80);
-    const end = Math.min(doc.lineCount - 1, mid + 80);
-    activeFileExcerpt =
-      `... (lines ${start + 1}-${end + 1}) ...\n` +
-      doc.getText(new vscode.Range(start, 0, end, doc.lineAt(end).text.length));
-  }
-
-  return {
+  let base: WorkspaceContext = {
     workspaceFolders: folders,
-    activeFile: doc.uri.fsPath,
-    languageId: doc.languageId,
-    selection,
-    activeFileExcerpt,
     shellKind,
+    proContext,
   };
+
+  if (editor) {
+    const doc = editor.document;
+    const selection = editor.selection.isEmpty
+      ? undefined
+      : redactSecrets(doc.getText(editor.selection).slice(0, MAX_SELECTION));
+
+    let activeFileExcerpt: string | undefined;
+    const full = redactSecrets(doc.getText());
+    if (full.length <= MAX_EXCERPT) {
+      activeFileExcerpt = full;
+    } else {
+      const mid = editor.selection.active.line;
+      const start = Math.max(0, mid - 80);
+      const end = Math.min(doc.lineCount - 1, mid + 80);
+      activeFileExcerpt =
+        `... (lines ${start + 1}-${end + 1}) ...\n` +
+        redactSecrets(
+          doc.getText(new vscode.Range(start, 0, end, doc.lineAt(end).text.length))
+        );
+    }
+
+    base = {
+      ...base,
+      activeFile: doc.uri.fsPath,
+      languageId: doc.languageId,
+      selection,
+      activeFileExcerpt,
+    };
+  }
+
+  if (proContext && transcript && folders.length) {
+    const terms = extractSearchTerms(transcript);
+    const hits: SearchHit[] = [];
+    for (const term of terms.slice(0, 3)) {
+      hits.push(...searchWorkspace(folders, term, { maxHits: 8 }));
+      if (hits.length >= 16) {
+        break;
+      }
+    }
+    // Deduplicate by path+line
+    const seen = new Set<string>();
+    const unique = hits.filter((h) => {
+      const k = `${h.path}:${h.line}`;
+      if (seen.has(k)) {
+        return false;
+      }
+      seen.add(k);
+      return true;
+    });
+    base.searchHits = unique.slice(0, 16);
+
+    const relatedPaths = [...new Set(unique.map((h) => h.path))].slice(0, 3);
+    base.relatedFiles = relatedPaths
+      .filter((p) => p !== base.activeFile)
+      .map((p) => {
+        try {
+          return readWorkspaceFile(p, { maxChars: 4000 });
+        } catch {
+          return undefined;
+        }
+      })
+      .filter((x): x is NonNullable<typeof x> => !!x);
+  }
+
+  return base;
 }
 
 export function detectShell(): "bash" | "powershell" | "cmd" {
@@ -65,7 +125,9 @@ export function formatContextForPrompt(ctx: WorkspaceContext): string {
   const lines: string[] = [];
   lines.push(`Shell: ${ctx.shellKind}`);
   if (ctx.workspaceFolders.length) {
-    lines.push(`Workspace folders:\n${ctx.workspaceFolders.map((p) => `- ${p}`).join("\n")}`);
+    lines.push(
+      `Workspace folders:\n${ctx.workspaceFolders.map((p) => `- ${p}`).join("\n")}`
+    );
   }
   if (ctx.activeFile) {
     lines.push(`Active file: ${ctx.activeFile} (${ctx.languageId ?? "unknown"})`);
@@ -76,24 +138,41 @@ export function formatContextForPrompt(ctx: WorkspaceContext): string {
   if (ctx.activeFileExcerpt) {
     lines.push(`Active file excerpt:\n\`\`\`\n${ctx.activeFileExcerpt}\n\`\`\``);
   }
+  if (ctx.searchHits?.length) {
+    lines.push(
+      "Workspace search hits:\n" +
+        ctx.searchHits
+          .map((h) => `- ${h.path}:${h.line}: ${h.text}`)
+          .join("\n")
+    );
+  }
+  if (ctx.relatedFiles?.length) {
+    for (const f of ctx.relatedFiles) {
+      lines.push(
+        `Related file ${f.path}${f.truncated ? " (truncated)" : ""}:\n\`\`\`\n${f.content}\n\`\`\``
+      );
+    }
+  }
+  if (!ctx.proContext) {
+    lines.push(
+      "Note: Free tier context is limited to the active file. Pro unlocks workspace search."
+    );
+  }
   return lines.join("\n\n");
 }
 
-export function resolveWorkspacePath(relativeOrAbsolute: string, ctx: WorkspaceContext): string {
-  if (path.isAbsolute(relativeOrAbsolute)) {
-    return relativeOrAbsolute;
-  }
-  const root = ctx.workspaceFolders[0];
-  if (!root) {
-    throw new Error("No workspace folder open.");
-  }
-  return path.join(root, relativeOrAbsolute);
+export function resolveWorkspacePath(
+  relativeOrAbsolute: string,
+  ctx: WorkspaceContext
+): string {
+  return resolveUnderRoots(relativeOrAbsolute, ctx.workspaceFolders);
 }
 
-export function isPathInsideWorkspace(filePath: string, ctx: WorkspaceContext): boolean {
-  const normalized = path.resolve(filePath);
-  return ctx.workspaceFolders.some((folder) => {
-    const root = path.resolve(folder);
-    return normalized === root || normalized.startsWith(root + path.sep);
-  });
+export function isPathInsideWorkspace(
+  filePath: string,
+  ctx: WorkspaceContext
+): boolean {
+  return isPathInsideRoots(filePath, ctx.workspaceFolders);
 }
+
+export { canonicalizePath };

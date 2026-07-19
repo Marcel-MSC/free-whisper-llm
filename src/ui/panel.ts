@@ -16,6 +16,12 @@ import {
   NativeCaptureError,
 } from "../audio/nativeCapture";
 import { getConfig } from "../config";
+import { ensurePrivacyConsent } from "../privacy";
+import { pushHistory, getHistory } from "../history";
+import { hasFeature, getEntitlement } from "../license/entitlements";
+import { track } from "../analytics";
+import { renderMarkdown } from "../markdown";
+import { LlmError } from "../llm/provider";
 
 export type PanelStatus =
   | "idle"
@@ -34,7 +40,10 @@ interface PanelState {
   confidence: number;
   summary: string;
   result: string;
+  resultHtml: string;
   error: string;
+  plan: string;
+  historyHtml: string;
 }
 
 type ActiveMode = "webview" | "native";
@@ -46,20 +55,23 @@ export class VoiceAgentPanel {
   private readonly panel: vscode.WebviewPanel;
   private readonly extensionUri: vscode.Uri;
   private readonly extensionPath: string;
+  private readonly context: vscode.ExtensionContext;
   private disposables: vscode.Disposable[] = [];
   private recording = false;
   private activeMode: ActiveMode = "webview";
   private onRecordingChange?: (recording: boolean) => void;
+  private abort?: AbortController;
+  private firstSuccessTracked = false;
 
   private constructor(
     panel: vscode.WebviewPanel,
-    extensionUri: vscode.Uri,
-    extensionPath: string,
+    context: vscode.ExtensionContext,
     onRecordingChange?: (recording: boolean) => void
   ) {
     this.panel = panel;
-    this.extensionUri = extensionUri;
-    this.extensionPath = extensionPath;
+    this.context = context;
+    this.extensionUri = context.extensionUri;
+    this.extensionPath = context.extensionPath;
     this.onRecordingChange = onRecordingChange;
 
     this.panel.webview.html = this.getHtml();
@@ -96,14 +108,18 @@ export class VoiceAgentPanel {
 
     VoiceAgentPanel.current = new VoiceAgentPanel(
       panel,
-      context.extensionUri,
-      context.extensionPath,
+      context,
       onRecordingChange
     );
     return VoiceAgentPanel.current;
   }
 
   public async startRecording(): Promise<void> {
+    const consented = await ensurePrivacyConsent(this.context);
+    if (!consented) {
+      return;
+    }
+
     const config = getConfig();
     const preferred = defaultCaptureMode(config.audioCaptureMode);
     const native = await probeNativeCapture();
@@ -113,36 +129,18 @@ export class VoiceAgentPanel {
       return;
     }
 
-    if (preferred === "native" && !native.available) {
-      // Fall back to webview with a clear hint if it also fails
-      this.activeMode = "webview";
-      this.recording = true;
-      this.onRecordingChange?.(true);
-      this.post({ type: "startRecording" });
-      this.updateState({
-        status: "recording",
-        transcript: "",
-        intent: "",
-        confidence: 0,
-        summary: "",
-        result: "",
-        error: "",
-      });
-      return;
-    }
-
-    // webview preferred (or auto on non-Linux)
     this.activeMode = "webview";
     this.recording = true;
     this.onRecordingChange?.(true);
     this.post({ type: "startRecording" });
-    this.updateState({
+    await this.updateState({
       status: "recording",
       transcript: "",
       intent: "",
       confidence: 0,
       summary: "",
       result: "",
+      resultHtml: "",
       error: "",
     });
   }
@@ -159,6 +157,11 @@ export class VoiceAgentPanel {
     return this.recording;
   }
 
+  public cancelRunning(): void {
+    this.abort?.abort();
+    this.abort = undefined;
+  }
+
   private async startNative(): Promise<void> {
     try {
       const { backend } = await startNativeCapture();
@@ -166,13 +169,14 @@ export class VoiceAgentPanel {
       this.recording = true;
       this.onRecordingChange?.(true);
       this.post({ type: "nativeRecording", active: true });
-      this.updateState({
+      await this.updateState({
         status: "recording",
         transcript: "",
         intent: "",
         confidence: 0,
         summary: `Native mic (${backend}) — speak, then click stop`,
         result: "",
+        resultHtml: "",
         error: "",
       });
     } catch (err) {
@@ -184,13 +188,14 @@ export class VoiceAgentPanel {
             : String(err);
       this.recording = false;
       this.onRecordingChange?.(false);
-      this.updateState({
+      await this.updateState({
         status: "error",
         transcript: "",
         intent: "",
         confidence: 0,
         summary: "",
         result: "",
+        resultHtml: "",
         error: message,
       });
       void vscode.window.showErrorMessage(`Voice Agent: ${message}`);
@@ -213,13 +218,14 @@ export class VoiceAgentPanel {
           : err instanceof Error
             ? err.message
             : String(err);
-      this.updateState({
+      await this.updateState({
         status: "error",
         transcript: "",
         intent: "",
         confidence: 0,
         summary: "",
         result: "",
+        resultHtml: "",
         error: message,
       });
       void vscode.window.showErrorMessage(`Voice Agent: ${message}`);
@@ -235,6 +241,7 @@ export class VoiceAgentPanel {
     switch (msg.type) {
       case "ready":
         this.post({ type: "ping" });
+        await this.pushPlanBadge();
         break;
       case "recordingStarted":
         this.recording = true;
@@ -252,7 +259,6 @@ export class VoiceAgentPanel {
         }
         break;
       case "micFailed": {
-        // Webview getUserMedia failed — try native (WSL/Pulse) automatically
         const reason =
           typeof msg.message === "string" ? msg.message : "Permission denied";
         const native = await probeNativeCapture();
@@ -264,13 +270,14 @@ export class VoiceAgentPanel {
         } else {
           this.recording = false;
           this.onRecordingChange?.(false);
-          this.updateState({
+          await this.updateState({
             status: "error",
             transcript: "",
             intent: "",
             confidence: 0,
             summary: "",
             result: "",
+            resultHtml: "",
             error:
               `Microphone access failed: ${reason}\n\n` +
               `Native fallback unavailable: ${native.detail}\n` +
@@ -283,13 +290,14 @@ export class VoiceAgentPanel {
       case "error":
         this.recording = false;
         this.onRecordingChange?.(false);
-        this.updateState({
+        await this.updateState({
           status: "error",
           transcript: "",
           intent: "",
           confidence: 0,
           summary: "",
           result: "",
+          resultHtml: "",
           error: typeof msg.message === "string" ? msg.message : "Unknown error",
         });
         break;
@@ -312,13 +320,39 @@ export class VoiceAgentPanel {
         }
         break;
       case "discardTranscript":
-        this.updateState({
+        await this.updateState({
           status: "idle",
           transcript: "",
           intent: "",
           confidence: 0,
           summary: "",
           result: "",
+          resultHtml: "",
+          error: "",
+        });
+        break;
+      case "cancel":
+        this.cancelRunning();
+        await this.updateState({
+          status: "idle",
+          transcript: "",
+          intent: "",
+          confidence: 0,
+          summary: "Cancelled.",
+          result: "",
+          resultHtml: "",
+          error: "",
+        });
+        break;
+      case "typePrompt":
+        await this.updateState({
+          status: "review",
+          transcript: typeof msg.text === "string" ? msg.text : "",
+          intent: "",
+          confidence: 0,
+          summary: "Type your request, then Send (no recording required).",
+          result: "",
+          resultHtml: "",
           error: "",
         });
         break;
@@ -331,19 +365,21 @@ export class VoiceAgentPanel {
 
     let wavPath: string | undefined;
     try {
-      this.updateState({
+      await this.updateState({
         status: "transcribing",
         transcript: "",
         intent: "",
         confidence: 0,
         summary: "",
         result: "",
+        resultHtml: "",
         error: "",
       });
 
       wavPath = await writeWavTemp(base64Wav);
       await this.transcribeAndRun(wavPath);
     } catch (err) {
+      await track("transcribe_error");
       this.showErr(err);
     } finally {
       if (wavPath) {
@@ -354,17 +390,19 @@ export class VoiceAgentPanel {
 
   private async handleWavPath(wavPath: string): Promise<void> {
     try {
-      this.updateState({
+      await this.updateState({
         status: "transcribing",
         transcript: "",
         intent: "",
         confidence: 0,
         summary: "",
         result: "",
+        resultHtml: "",
         error: "",
       });
       await this.transcribeAndRun(wavPath);
     } catch (err) {
+      await track("transcribe_error");
       this.showErr(err);
     } finally {
       await cleanupTemp(wavPath);
@@ -372,16 +410,18 @@ export class VoiceAgentPanel {
   }
 
   private async transcribeAndRun(wavPath: string): Promise<void> {
+    const start = Date.now();
     const { text } = await transcribeWav(this.extensionPath, wavPath);
+    await track("transcribe_ok", { ms: Date.now() - start });
 
-    // Pause for user review/edit before calling the LLM
-    this.updateState({
+    await this.updateState({
       status: "review",
       transcript: text,
       intent: "",
       confidence: 0,
       summary: "Review the transcript, edit if needed, then Send.",
       result: "",
+      resultHtml: "",
       error: "",
     });
   }
@@ -389,75 +429,148 @@ export class VoiceAgentPanel {
   private async runWithTranscript(raw: string): Promise<void> {
     const text = raw.trim();
     if (!text) {
-      this.updateState({
+      await this.updateState({
         status: "error",
         transcript: "",
         intent: "",
         confidence: 0,
         summary: "",
         result: "",
+        resultHtml: "",
         error: "Transcript is empty. Record again or type something before Send.",
       });
       return;
     }
 
+    const consented = await ensurePrivacyConsent(this.context);
+    if (!consented) {
+      return;
+    }
+
+    this.abort?.abort();
+    this.abort = new AbortController();
+
     try {
-      this.updateState({
+      await this.updateState({
         status: "routing",
         transcript: text,
         intent: "",
         confidence: 0,
         summary: "",
         result: "",
+        resultHtml: "",
         error: "",
       });
 
-      this.updateState({
+      await this.updateState({
         status: "running",
         transcript: text,
         intent: "…",
         confidence: 0,
-        summary: "Running agent…",
+        summary: "Running agent… (Cancel to abort)",
         result: "",
+        resultHtml: "",
         error: "",
       });
 
-      const run = await runAgent(text);
+      const run = await runAgent(text, { signal: this.abort.signal });
 
-      this.updateState({
+      if (await hasFeature("sessionHistory")) {
+        await pushHistory({
+          transcript: run.transcript,
+          intent: run.routed.intent,
+          summary: run.routed.summary,
+          resultPreview: run.resultMarkdown,
+        });
+      }
+
+      if (!this.firstSuccessTracked) {
+        this.firstSuccessTracked = true;
+        await track("first_success", { intent: run.routed.intent });
+      }
+
+      await this.updateState({
         status: "done",
         transcript: run.transcript,
         intent: run.routed.intent,
         confidence: run.routed.confidence,
         summary: run.routed.summary,
         result: run.resultMarkdown,
+        resultHtml: renderMarkdown(run.resultMarkdown),
         error: "",
       });
     } catch (err) {
+      if (err instanceof Error && /cancel|abort/i.test(err.message)) {
+        await this.updateState({
+          status: "idle",
+          transcript: text,
+          intent: "",
+          confidence: 0,
+          summary: "Cancelled.",
+          result: "",
+          resultHtml: "",
+          error: "",
+        });
+        return;
+      }
       this.showErr(err);
+    } finally {
+      this.abort = undefined;
     }
   }
 
   private showErr(err: unknown): void {
     const message =
-      err instanceof WhisperError || err instanceof NativeCaptureError
+      err instanceof WhisperError ||
+      err instanceof NativeCaptureError ||
+      err instanceof LlmError
         ? err.message
         : err instanceof Error
           ? err.message
           : String(err);
-    this.updateState({
+    void this.updateState({
       status: "error",
       transcript: "",
       intent: "",
       confidence: 0,
       summary: "",
       result: "",
+      resultHtml: "",
       error: message,
     });
     void vscode.window.showErrorMessage(`Voice Agent: ${message}`);
   }
 
-  private updateState(state: PanelState): void {
+  private async pushPlanBadge(): Promise<void> {
+    const ent = await getEntitlement();
+    this.post({
+      type: "plan",
+      plan: ent.tier,
+      email: ent.email || "",
+    });
+  }
+
+  private async updateState(partial: Omit<PanelState, "plan" | "historyHtml"> & {
+    plan?: string;
+    historyHtml?: string;
+  }): Promise<void> {
+    const ent = await getEntitlement();
+    let historyHtml = "";
+    if (await hasFeature("sessionHistory")) {
+      const hist = getHistory().slice(0, 8);
+      historyHtml = hist
+        .map(
+          (h) =>
+            `<div class="hist-item"><div class="hist-meta">${escapeHtml(h.ts.slice(0, 19))} · ${escapeHtml(h.intent)}</div><div class="hist-text">${escapeHtml(h.summary || h.transcript)}</div></div>`
+        )
+        .join("");
+    }
+    const state: PanelState = {
+      ...partial,
+      plan: partial.plan ?? ent.tier,
+      historyHtml: partial.historyHtml ?? historyHtml,
+      resultHtml: partial.resultHtml ?? "",
+    };
     this.post({ type: "state", state });
   }
 
@@ -469,6 +582,7 @@ export class VoiceAgentPanel {
     VoiceAgentPanel.current = undefined;
     this.recording = false;
     this.onRecordingChange?.(false);
+    this.abort?.abort();
     void cancelNativeCapture();
     while (this.disposables.length) {
       const d = this.disposables.pop();
@@ -498,8 +612,8 @@ export class VoiceAgentPanel {
 </head>
 <body>
   <header class="header">
-    <h1>Voice Agent</h1>
-    <p class="subtitle">Speak to plan, ask, edit code, or run shell commands.</p>
+    <h1>Voice Agent <span id="planBadge" class="badge">free</span></h1>
+    <p class="subtitle">Speak or type to plan, ask, edit code, or run shell commands.</p>
   </header>
 
   <section class="controls">
@@ -507,13 +621,15 @@ export class VoiceAgentPanel {
       <span class="mic-icon" aria-hidden="true"></span>
       <span id="micLabel">Click to talk</span>
     </button>
-    <div id="status" class="status">idle</div>
+    <button id="typeBtn" class="btn" type="button">Type instead</button>
+    <button id="cancelBtn" class="btn danger hidden" type="button">Cancel</button>
+    <div id="status" class="status" role="status" aria-live="polite">idle</div>
   </section>
 
   <section class="card">
-    <h2>Transcript</h2>
+    <h2>Transcript / Prompt</h2>
     <pre id="transcript" class="block empty">—</pre>
-    <textarea id="transcriptEdit" class="transcript-edit hidden" rows="4" placeholder="Transcript will appear here…"></textarea>
+    <textarea id="transcriptEdit" class="transcript-edit hidden" rows="4" placeholder="Speak, or type a request here…"></textarea>
     <div id="reviewActions" class="review-actions hidden">
       <button id="sendBtn" class="btn primary" type="button">Send to agent</button>
       <button id="discardBtn" class="btn" type="button">Discard</button>
@@ -528,7 +644,16 @@ export class VoiceAgentPanel {
 
   <section class="card">
     <h2>Result</h2>
-    <pre id="result" class="block empty">—</pre>
+    <div id="result" class="block md empty">—</div>
+    <div class="review-actions">
+      <button id="copyBtn" class="btn" type="button">Copy result</button>
+      <button id="retryBtn" class="btn" type="button">Retry</button>
+    </div>
+  </section>
+
+  <section class="card" id="historyCard">
+    <h2>History <span class="muted">(Pro)</span></h2>
+    <div id="history" class="history empty">Upgrade to Pro for session history.</div>
   </section>
 
   <section class="card error-card hidden" id="errorCard">
@@ -540,6 +665,14 @@ export class VoiceAgentPanel {
 </body>
 </html>`;
   }
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function getNonce(): string {

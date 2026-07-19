@@ -174,6 +174,99 @@ body {
   filter: brightness(1.08);
 }
 
+.badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  vertical-align: middle;
+  background: var(--border);
+  color: var(--muted);
+}
+
+.badge.pro {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.btn.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.md {
+  font-family: var(--font);
+}
+
+.md-p {
+  margin: 0 0 0.75em;
+  line-height: 1.5;
+}
+
+.md-h {
+  margin: 0.4em 0 0.5em;
+  font-size: 1rem;
+}
+
+.md-ul {
+  margin: 0 0 0.75em;
+  padding-left: 1.2em;
+}
+
+.md-code {
+  margin: 0 0 0.75em;
+  padding: 10px 12px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+}
+
+.md-inline {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--bg);
+}
+
+.history.empty {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.hist-item {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.hist-item:last-child {
+  border-bottom: none;
+}
+
+.hist-meta {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.hist-text {
+  font-size: 0.85rem;
+}
+
+.muted {
+  color: var(--muted);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 @keyframes pulse {
   0%,
   100% {

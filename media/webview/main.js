@@ -3,15 +3,21 @@
 
   const micBtn = document.getElementById("micBtn");
   const micLabel = document.getElementById("micLabel");
+  const typeBtn = document.getElementById("typeBtn");
+  const cancelBtn = document.getElementById("cancelBtn");
   const statusEl = document.getElementById("status");
   const transcriptEl = document.getElementById("transcript");
   const transcriptEdit = document.getElementById("transcriptEdit");
   const reviewActions = document.getElementById("reviewActions");
   const sendBtn = document.getElementById("sendBtn");
   const discardBtn = document.getElementById("discardBtn");
+  const copyBtn = document.getElementById("copyBtn");
+  const retryBtn = document.getElementById("retryBtn");
   const intentMetaEl = document.getElementById("intentMeta");
   const summaryEl = document.getElementById("summary");
   const resultEl = document.getElementById("result");
+  const historyEl = document.getElementById("history");
+  const planBadge = document.getElementById("planBadge");
   const errorCard = document.getElementById("errorCard");
   const errorEl = document.getElementById("error");
 
@@ -22,12 +28,24 @@
   let recording = false;
   let nativeMode = false;
   let reviewMode = false;
+  let lastTranscript = "";
+  let lastResultText = "";
   const buffers = [];
   let sampleRate = 48000;
 
   function setText(el, text, empty) {
     el.textContent = text || "—";
     el.classList.toggle("empty", !!empty || !text);
+  }
+
+  function setHtml(el, html, empty) {
+    if (!html) {
+      el.textContent = "—";
+      el.classList.add("empty");
+      return;
+    }
+    el.innerHTML = html;
+    el.classList.toggle("empty", !!empty);
   }
 
   function setRecordingUi(on) {
@@ -53,6 +71,10 @@
       reviewActions.classList.add("hidden");
       transcriptEl.classList.remove("hidden");
     }
+  }
+
+  function setBusyUi(busy) {
+    cancelBtn.classList.toggle("hidden", !busy);
   }
 
   async function startRecording() {
@@ -218,6 +240,7 @@
 
   function sendTranscript() {
     const text = (transcriptEdit.value || "").trim();
+    lastTranscript = text;
     setReviewUi(false);
     setText(transcriptEl, text, !text);
     vscode.postMessage({ type: "sendTranscript", text: text });
@@ -233,6 +256,15 @@
     }
   });
 
+  typeBtn.addEventListener("click", () => {
+    setReviewUi(true, lastTranscript || "");
+    vscode.postMessage({ type: "typePrompt", text: lastTranscript || "" });
+  });
+
+  cancelBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "cancel" });
+  });
+
   sendBtn.addEventListener("click", () => {
     sendTranscript();
   });
@@ -241,6 +273,24 @@
     setReviewUi(false);
     setText(transcriptEl, "", true);
     vscode.postMessage({ type: "discardTranscript" });
+  });
+
+  copyBtn.addEventListener("click", async () => {
+    const text = lastResultText || resultEl.textContent || "";
+    try {
+      await navigator.clipboard.writeText(text);
+      statusEl.textContent = "copied";
+    } catch (_) {
+      statusEl.textContent = "copy-failed";
+    }
+  });
+
+  retryBtn.addEventListener("click", () => {
+    if (lastTranscript) {
+      vscode.postMessage({ type: "sendTranscript", text: lastTranscript });
+    } else {
+      setReviewUi(true, "");
+    }
   });
 
   transcriptEdit.addEventListener("keydown", (event) => {
@@ -263,18 +313,29 @@
     } else if (msg.type === "nativeRecording") {
       nativeMode = !!msg.active;
       setRecordingUi(!!msg.active);
+    } else if (msg.type === "plan") {
+      planBadge.textContent = msg.plan || "free";
+      planBadge.classList.toggle("pro", msg.plan === "pro");
     } else if (msg.type === "state" && msg.state) {
       const s = msg.state;
       statusEl.textContent = s.status || "idle";
+      setBusyUi(s.status === "routing" || s.status === "running" || s.status === "transcribing");
+
+      if (s.plan) {
+        planBadge.textContent = s.plan;
+        planBadge.classList.toggle("pro", s.plan === "pro");
+      }
 
       if (s.status === "review") {
         setReviewUi(true, s.transcript || "");
+        lastTranscript = s.transcript || "";
       } else {
         if (reviewMode && s.status !== "routing" && s.status !== "running") {
           setReviewUi(false);
         } else if (s.status === "routing" || s.status === "running" || s.status === "done") {
           setReviewUi(false);
           setText(transcriptEl, s.transcript, !s.transcript);
+          lastTranscript = s.transcript || lastTranscript;
         } else if (s.status !== "review") {
           setText(transcriptEl, s.transcript, !s.transcript);
         }
@@ -288,7 +349,19 @@
         intentMetaEl.textContent = "—";
       }
       setText(summaryEl, s.summary, !s.summary);
-      setText(resultEl, s.result, !s.result);
+
+      lastResultText = s.result || "";
+      if (s.resultHtml) {
+        setHtml(resultEl, s.resultHtml, !s.resultHtml);
+      } else {
+        setText(resultEl, s.result, !s.result);
+      }
+
+      if (s.historyHtml) {
+        historyEl.classList.remove("empty");
+        historyEl.innerHTML = s.historyHtml;
+      }
+
       if (s.error) {
         errorCard.classList.remove("hidden");
         errorEl.textContent = s.error;

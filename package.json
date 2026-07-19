@@ -2,8 +2,25 @@
   "name": "free-whisper-llm",
   "displayName": "Voice Agent",
   "description": "Local Whisper voice agent for VS Code and Cursor — plan, ask, edit code, or run shell commands by speaking.",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "publisher": "free-whisper-llm",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/free-whisper-llm/free-whisper-llm"
+  },
+  "homepage": "https://github.com/free-whisper-llm/free-whisper-llm#readme",
+  "bugs": {
+    "url": "https://github.com/free-whisper-llm/free-whisper-llm/issues"
+  },
+  "keywords": [
+    "voice",
+    "whisper",
+    "speech-to-text",
+    "agent",
+    "ollama",
+    "coding"
+  ],
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -34,6 +51,50 @@
       {
         "command": "voiceAgent.setupWhisper",
         "title": "Voice Agent: Setup Whisper"
+      },
+      {
+        "command": "voiceAgent.setApiKey",
+        "title": "Voice Agent: Set API Key"
+      },
+      {
+        "command": "voiceAgent.clearApiKey",
+        "title": "Voice Agent: Clear API Key"
+      },
+      {
+        "command": "voiceAgent.healthCheck",
+        "title": "Voice Agent: Health Check"
+      },
+      {
+        "command": "voiceAgent.showPrivacy",
+        "title": "Voice Agent: Show Privacy Notice"
+      },
+      {
+        "command": "voiceAgent.resetPrivacyConsent",
+        "title": "Voice Agent: Reset Privacy Consent"
+      },
+      {
+        "command": "voiceAgent.activateLicense",
+        "title": "Voice Agent: Activate Pro License"
+      },
+      {
+        "command": "voiceAgent.deactivateLicense",
+        "title": "Voice Agent: Deactivate Pro License"
+      },
+      {
+        "command": "voiceAgent.manageSubscription",
+        "title": "Voice Agent: Manage Subscription / Checkout"
+      },
+      {
+        "command": "voiceAgent.showPlan",
+        "title": "Voice Agent: Show Plan"
+      },
+      {
+        "command": "voiceAgent.clearHistory",
+        "title": "Voice Agent: Clear History"
+      },
+      {
+        "command": "voiceAgent.showAnalytics",
+        "title": "Voice Agent: Show Local Analytics"
       }
     ],
     "keybindings": [
@@ -53,6 +114,47 @@
         "command": "voiceAgent.stop",
         "key": "escape",
         "when": "voiceAgent.recording"
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "voiceAgent.gettingStarted",
+        "title": "Get started with Voice Agent",
+        "description": "Local Whisper + your LLM for voice coding.",
+        "steps": [
+          {
+            "id": "setupWhisper",
+            "title": "Setup Whisper",
+            "description": "Install the local Python STT environment.\n[Setup Whisper](command:voiceAgent.setupWhisper)",
+            "media": {
+              "markdown": "media/walkthrough/setup.md"
+            }
+          },
+          {
+            "id": "configureLlm",
+            "title": "Configure your LLM",
+            "description": "Use Ollama locally, or set an API key for OpenAI/Anthropic.\n[Set API Key](command:voiceAgent.setApiKey)\n[Health Check](command:voiceAgent.healthCheck)",
+            "media": {
+              "markdown": "media/walkthrough/llm.md"
+            }
+          },
+          {
+            "id": "privacy",
+            "title": "Review privacy",
+            "description": "Audio stays local. Transcript + editor context may be sent to your LLM.\n[Privacy notice](command:voiceAgent.showPrivacy)",
+            "media": {
+              "markdown": "media/walkthrough/privacy.md"
+            }
+          },
+          {
+            "id": "talk",
+            "title": "Talk or type",
+            "description": "Press Ctrl+Shift+Space (Cmd+Shift+Space on macOS), or open the panel and type.\n[Open Panel](command:voiceAgent.openPanel)",
+            "media": {
+              "markdown": "media/walkthrough/talk.md"
+            }
+          }
+        ]
       }
     ],
     "configuration": {
@@ -93,6 +195,11 @@
           "default": "",
           "description": "Optional override path to whisper_transcribe.py. Empty = bundled script."
         },
+        "voiceAgent.whisper.warmSidecar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Keep Whisper model warm via persistent sidecar (Pro). Falls back to one-shot on Free."
+        },
         "voiceAgent.audio.captureMode": {
           "type": "string",
           "default": "auto",
@@ -131,17 +238,30 @@
         "voiceAgent.llm.apiKey": {
           "type": "string",
           "default": "",
-          "description": "API key for OpenAI or Anthropic. Leave empty for Ollama."
+          "description": "DEPRECATED — use “Voice Agent: Set API Key” (Secret Storage). Legacy values are migrated once."
+        },
+        "voiceAgent.llm.timeoutMs": {
+          "type": "number",
+          "default": 90000,
+          "minimum": 5000,
+          "description": "HTTP timeout for LLM requests in milliseconds."
+        },
+        "voiceAgent.llm.retries": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 5,
+          "description": "Retries for transient LLM failures."
         },
         "voiceAgent.shell.confirm": {
           "type": "boolean",
           "default": true,
-          "description": "Always ask before running shell commands."
+          "description": "Ask before running low-risk shell commands. Medium/high risk always confirm; blocked commands never run."
         },
         "voiceAgent.edit.confirmMultiFile": {
           "type": "boolean",
           "default": true,
-          "description": "Ask before applying edits that touch more than one file."
+          "description": "Ask before applying edits (diff preview is always shown)."
         },
         "voiceAgent.confidenceThreshold": {
           "type": "number",
@@ -149,6 +269,21 @@
           "minimum": 0,
           "maximum": 1,
           "description": "Below this confidence, intent falls back to ask."
+        },
+        "voiceAgent.analytics.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Write privacy-safe local analytics (no audio/source/transcripts) to ~/.local/share/voice-agent/analytics.jsonl."
+        },
+        "voiceAgent.billing.checkoutUrl": {
+          "type": "string",
+          "default": "https://example.com/voice-agent/checkout",
+          "description": "Browser checkout URL for Voice Agent Pro."
+        },
+        "voiceAgent.billing.portalUrl": {
+          "type": "string",
+          "default": "https://example.com/voice-agent/portal",
+          "description": "Customer portal URL for managing a Pro subscription."
         }
       }
     }
@@ -158,12 +293,14 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "package": "vsce package --no-dependencies",
-    "lint": "tsc -p ./ --noEmit"
+    "lint": "tsc -p ./ --noEmit",
+    "test": "npm run compile && node out/test/runTests.js",
+    "smoke:package": "npm run package && node scripts/smoke_package.js"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
-    "@vscode/vsce": "^2.32.0",
+    "@vscode/vsce": "^3.6.0",
     "typescript": "^5.4.0"
   },
   "capabilities": {

@@ -13,10 +13,15 @@ export interface VoiceAgentConfig {
   llmProvider: LlmProvider;
   llmBaseUrl: string;
   llmModel: string;
+  /** @deprecated Use Secret Storage via getApiKey(); kept for migration only. */
   llmApiKey: string;
   shellConfirm: boolean;
   editConfirmMultiFile: boolean;
   confidenceThreshold: number;
+  llmTimeoutMs: number;
+  llmRetries: number;
+  warmWhisper: boolean;
+  analyticsEnabled: boolean;
 }
 
 export function getConfig(): VoiceAgentConfig {
@@ -34,5 +39,9 @@ export function getConfig(): VoiceAgentConfig {
     shellConfirm: cfg.get<boolean>("shell.confirm", true),
     editConfirmMultiFile: cfg.get<boolean>("edit.confirmMultiFile", true),
     confidenceThreshold: cfg.get<number>("confidenceThreshold", 0.55),
+    llmTimeoutMs: cfg.get<number>("llm.timeoutMs", 90_000),
+    llmRetries: cfg.get<number>("llm.retries", 2),
+    warmWhisper: cfg.get<boolean>("whisper.warmSidecar", true),
+    analyticsEnabled: cfg.get<boolean>("analytics.enabled", true),
   };
 }

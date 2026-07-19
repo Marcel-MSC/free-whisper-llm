@@ -42,15 +42,19 @@ Rules:
 
 export async function routeIntent(
   transcript: string,
-  ctx: WorkspaceContext
+  ctx: WorkspaceContext,
+  signal?: AbortSignal
 ): Promise<RoutedIntent> {
   const config = getConfig();
   const user = `Utterance:\n"""${transcript}"""\n\nContext:\n${formatContextForPrompt(ctx)}`;
 
-  const { content } = await chat([
-    { role: "system", content: SYSTEM },
-    { role: "user", content: user },
-  ]);
+  const { content } = await chat(
+    [
+      { role: "system", content: SYSTEM },
+      { role: "user", content: user },
+    ],
+    { signal }
+  );
 
   const parsed = parseRouterJson(content);
   let intent = normalizeIntent(parsed.intent);

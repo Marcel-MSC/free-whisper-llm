@@ -162,6 +162,16 @@ export async function transcribeWav(
     throw new WhisperError(`Whisper script not found: ${script}`);
   }
 
+  // Pro: prefer warm sidecar (dynamic import avoids circular init).
+  if (config.warmWhisper) {
+    try {
+      const { transcribeViaSidecar } = await import("./whisperSidecar");
+      return await transcribeViaSidecar(extensionPath, wavPath);
+    } catch {
+      // Fall through to one-shot process (Free tier or sidecar failure).
+    }
+  }
+
   const args = [
     script,
     "--audio",
