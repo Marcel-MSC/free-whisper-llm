@@ -29,9 +29,15 @@ export function isPathInsideRoots(filePath: string, roots: string[]): boolean {
   });
 }
 
+/**
+ * Resolve a relative path under workspace roots.
+ * When preferredRoot is set and is one of the roots, join relative paths there.
+ * Otherwise fall back to roots[0].
+ */
 export function resolveUnderRoots(
   relativeOrAbsolute: string,
-  roots: string[]
+  roots: string[],
+  preferredRoot?: string
 ): string {
   if (path.isAbsolute(relativeOrAbsolute)) {
     return canonicalizePath(relativeOrAbsolute);
@@ -39,5 +45,15 @@ export function resolveUnderRoots(
   if (!roots.length) {
     throw new Error("No workspace folder open.");
   }
-  return canonicalizePath(path.join(roots[0], relativeOrAbsolute));
+  let base = roots[0];
+  if (preferredRoot) {
+    const preferredCanon = canonicalizePath(preferredRoot);
+    const match = roots.find(
+      (r) => canonicalizePath(r) === preferredCanon
+    );
+    if (match) {
+      base = match;
+    }
+  }
+  return canonicalizePath(path.join(base, relativeOrAbsolute));
 }

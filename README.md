@@ -27,8 +27,10 @@ Veja [PRIVACY.md](PRIVACY.md).
 | plan / ask / edit / shell | ✓ (edit 1 arquivo) | ✓ multi-arquivo |
 | Diff + confirmação + shell risk gates | ✓ | ✓ |
 | Busca no workspace / contexto rico | | ✓ |
-| Histórico de sessão | | ✓ |
+| Histórico de sessão (Show transcripts / Load more) | | ✓ |
 | Warm Whisper sidecar | | ✓ |
+
+> **Idiomas:** o botão **Lang** no painel controla só o Whisper (STT). O LLM padrão `llama3.2` oficialmente cobre en, de, fr, it, pt, hi, es, th; `auto` é só detecção do Whisper.
 
 Comandos: **Activate Pro License**, **Manage Subscription / Checkout**, **Show Plan**.  
 Pilot keys: `node scripts/mint_license.js you@example.com`.
@@ -88,16 +90,18 @@ npm run smoke:package    # valida conteúdo do .vsix
 3. Opcional: **Voice Agent: Health Check**
 4. `Ctrl+Shift+Space` / `Cmd+Shift+Space`, clique no **mic**, ou **Type instead**
 5. Revise o transcript → **Send to agent** (`Ctrl+Enter`)
-6. Confirme diffs de edit e comandos de shell quando pedido
+6. Confirme diffs de edit (ou ative **Always approve edits**) e comandos de shell quando pedido
+7. Use **Copy** em Transcript / Intent / Result; escolha a pasta em **Workspace** se houver multi-root
 
 ## Settings principais
 
 | Setting | Default | Descrição |
 |---------|---------|-----------|
 | `voiceAgent.whisper.model` | `base` | tiny / base / small / medium / large-v3 |
-| `voiceAgent.whisper.language` | `pt` | Idioma do STT (`auto` para detectar) |
+| `voiceAgent.whisper.language` | `pt` | Idioma do STT Whisper: `pt\|en\|es\|fr\|de\|it\|auto` (não muda o LLM) |
 | `voiceAgent.whisper.warmSidecar` | `true` | Sidecar quente (Pro) |
 | `voiceAgent.audio.captureMode` | `auto` | auto / webview / native |
+| `voiceAgent.audio.autoStopMs` | `5000` | Para o mic automaticamente após N ms |
 | `voiceAgent.llm.provider` | `ollama` | ollama / openai / anthropic |
 | `voiceAgent.llm.baseUrl` | `http://127.0.0.1:11434` | Ollama ou OpenAI-compatible |
 | `voiceAgent.llm.model` | `llama3.2` | Nome do modelo |
@@ -105,6 +109,8 @@ npm run smoke:package    # valida conteúdo do .vsix
 | `voiceAgent.llm.retries` | `2` | Retries |
 | `voiceAgent.shell.confirm` | `true` | Confirmar shell low-risk |
 | `voiceAgent.analytics.enabled` | `true` | Analytics local privacy-safe |
+| `voiceAgent.history.maxEntries` | `100` | Máx. entradas de histórico Pro (local) |
+| `voiceAgent.history.recordDrafts` | `true` | Incluir drafts/discards no histórico |
 | `voiceAgent.billing.checkoutUrl` | _(placeholder)_ | URL de checkout Pro |
 
 > `voiceAgent.llm.apiKey` está **deprecated** — use Secret Storage.

@@ -12,6 +12,8 @@
   const sendBtn = document.getElementById("sendBtn");
   const discardBtn = document.getElementById("discardBtn");
   const copyBtn = document.getElementById("copyBtn");
+  const copyTranscriptBtn = document.getElementById("copyTranscriptBtn");
+  const copyIntentBtn = document.getElementById("copyIntentBtn");
   const retryBtn = document.getElementById("retryBtn");
   const intentMetaEl = document.getElementById("intentMeta");
   const summaryEl = document.getElementById("summary");
@@ -20,6 +22,17 @@
   const planBadge = document.getElementById("planBadge");
   const errorCard = document.getElementById("errorCard");
   const errorEl = document.getElementById("error");
+  const showHistoryBtn = document.getElementById("showHistoryBtn");
+  const hideHistoryBtn = document.getElementById("hideHistoryBtn");
+  const loadMoreHistoryBtn = document.getElementById("loadMoreHistoryBtn");
+  const historyActions = document.getElementById("historyActions");
+  const historyCount = document.getElementById("historyCount");
+  const historyControls = document.getElementById("historyControls");
+  const langBtn = document.getElementById("langBtn");
+  const alwaysApproveBtn = document.getElementById("alwaysApproveBtn");
+  const workspaceSelect = document.getElementById("workspaceSelect");
+  const progressCard = document.getElementById("progressCard");
+  const progressList = document.getElementById("progressList");
 
   let mediaStream = null;
   let audioContext = null;
@@ -30,8 +43,156 @@
   let reviewMode = false;
   let lastTranscript = "";
   let lastResultText = "";
+  let lastSummary = "";
+  let lastIntentMeta = "";
+  let historyOpen = false;
+  let historyOffset = 0;
+  let historyHasMore = false;
+  let historyPro = false;
+  let historyTotal = 0;
+  let autoStopMs = 5000;
+  let autoStopTimer = null;
+  let autoStopCountdown = null;
   const buffers = [];
   let sampleRate = 48000;
+
+  function kindLabel(kind) {
+    switch (kind) {
+      case "draft_transcribed":
+        return "voice draft";
+      case "draft_typed":
+        return "typed draft";
+      case "draft_discarded":
+        return "discarded";
+      case "run_success":
+        return "run";
+      case "run_error":
+        return "error";
+      case "run_cancelled":
+        return "cancelled";
+      default:
+        return kind || "entry";
+    }
+  }
+
+  function clearAutoStop() {
+    if (autoStopTimer) {
+      clearTimeout(autoStopTimer);
+      autoStopTimer = null;
+    }
+    if (autoStopCountdown) {
+      clearInterval(autoStopCountdown);
+      autoStopCountdown = null;
+    }
+  }
+
+  function armAutoStop(ms) {
+    clearAutoStop();
+    const duration = typeof ms === "number" && ms > 0 ? ms : autoStopMs;
+    autoStopMs = duration;
+    const endsAt = Date.now() + duration;
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+      if (recording) {
+        micLabel.textContent = "Listening… auto-stops in " + left + "s";
+      }
+    };
+    tick();
+    autoStopCountdown = setInterval(tick, 250);
+    autoStopTimer = setTimeout(() => {
+      clearAutoStop();
+      if (recording) {
+        stopRecording();
+      }
+    }, duration);
+  }
+
+  function renderHistoryItems(items, append) {
+    if (!append) {
+      historyEl.innerHTML = "";
+    }
+    if (!items || !items.length) {
+      if (!append) {
+        historyEl.textContent = "No transcripts yet.";
+        historyEl.classList.add("empty");
+      }
+      return;
+    }
+    historyEl.classList.remove("empty");
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < items.length; i++) {
+      const h = items[i];
+      const wrap = document.createElement("div");
+      wrap.className = "hist-item";
+      wrap.setAttribute("role", "button");
+      wrap.tabIndex = 0;
+      wrap.dataset.transcript = h.transcript || "";
+      const meta = document.createElement("div");
+      meta.className = "hist-meta";
+      meta.textContent =
+        (h.ts || "").slice(0, 19) + " · " + kindLabel(h.kind);
+      const title = document.createElement("div");
+      title.className = "hist-title";
+      title.textContent = h.title || h.summary || h.transcript || "—";
+      wrap.appendChild(meta);
+      wrap.appendChild(title);
+      if (h.transcript && h.transcript !== h.title) {
+        const text = document.createElement("div");
+        text.className = "hist-text";
+        text.textContent = h.transcript;
+        wrap.appendChild(text);
+      }
+      if (h.error) {
+        const err = document.createElement("div");
+        err.className = "hist-error";
+        err.textContent = h.error;
+        wrap.appendChild(err);
+      }
+      frag.appendChild(wrap);
+    }
+    historyEl.appendChild(frag);
+  }
+
+  function setHistoryUi(pro, total) {
+    historyPro = !!pro;
+    historyTotal = typeof total === "number" ? total : historyTotal;
+    if (!historyPro) {
+      historyControls.classList.add("hidden");
+      historyActions.classList.add("hidden");
+      historyEl.classList.add("empty");
+      historyEl.textContent = "Upgrade to Pro for transcript history.";
+      historyCount.textContent = "";
+      return;
+    }
+    historyControls.classList.remove("hidden");
+    historyCount.textContent = historyTotal
+      ? historyTotal + " saved"
+      : "empty";
+    if (!historyOpen) {
+      showHistoryBtn.classList.remove("hidden");
+      hideHistoryBtn.classList.add("hidden");
+      historyActions.classList.add("hidden");
+      if (!historyEl.dataset.loaded) {
+        historyEl.classList.add("empty");
+        historyEl.textContent = "Click Show transcripts to list recent inputs.";
+      }
+    }
+  }
+
+  function openHistory(reset) {
+    historyOpen = true;
+    showHistoryBtn.classList.add("hidden");
+    hideHistoryBtn.classList.remove("hidden");
+    historyActions.classList.remove("hidden");
+    historyEl.dataset.loaded = "1";
+    const offset = reset ? 0 : historyOffset;
+    vscode.postMessage({
+      type: "loadHistory",
+      offset: offset,
+      limit: 10,
+      reset: !!reset,
+    });
+  }
 
   function setText(el, text, empty) {
     el.textContent = text || "—";
@@ -48,10 +209,12 @@
     el.classList.toggle("empty", !!empty);
   }
 
-  function setRecordingUi(on) {
+  function setRecordingUi(on, label) {
     recording = on;
     micBtn.classList.toggle("recording", on);
-    micLabel.textContent = on ? "Listening… click to stop" : "Click to talk";
+    micLabel.textContent = on
+      ? label || "Listening… click to stop"
+      : "Click to talk";
   }
 
   function setReviewUi(on, text) {
@@ -77,12 +240,74 @@
     cancelBtn.classList.toggle("hidden", !busy);
   }
 
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text || "");
+      statusEl.textContent = "copied";
+    } catch (_) {
+      statusEl.textContent = "copy-failed";
+    }
+  }
+
+  function applySettings(msg) {
+    if (msg.language) {
+      langBtn.textContent = "Lang: " + msg.language;
+    }
+    if (typeof msg.autoStopMs === "number") {
+      autoStopMs = msg.autoStopMs;
+    }
+    if (typeof msg.alwaysApproveEdits === "boolean") {
+      alwaysApproveBtn.textContent =
+        "Always approve edits: " + (msg.alwaysApproveEdits ? "on" : "off");
+      alwaysApproveBtn.classList.toggle("active", !!msg.alwaysApproveEdits);
+    }
+    const folders = msg.workspaces || [];
+    workspaceSelect.innerHTML = "";
+    if (!folders.length) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "Open a folder in Cursor";
+      workspaceSelect.appendChild(opt);
+      return;
+    }
+    for (let i = 0; i < folders.length; i++) {
+      const f = folders[i];
+      const opt = document.createElement("option");
+      opt.value = f.path;
+      opt.textContent = f.name || f.path;
+      if (f.path === msg.selectedWorkspace) {
+        opt.selected = true;
+      }
+      workspaceSelect.appendChild(opt);
+    }
+  }
+
+  function renderProgress(steps, current) {
+    if (!steps || !steps.length) {
+      progressCard.classList.add("hidden");
+      progressList.innerHTML = "";
+      return;
+    }
+    progressCard.classList.remove("hidden");
+    progressList.innerHTML = "";
+    for (let i = 0; i < steps.length; i++) {
+      const s = steps[i];
+      const li = document.createElement("li");
+      li.textContent = s.label || s.step;
+      if (s.step === current) {
+        li.classList.add("current");
+      }
+      progressList.appendChild(li);
+    }
+  }
+
   async function startRecording() {
     if (recording) {
       return;
     }
     if (nativeMode) {
       setRecordingUi(true);
+      armAutoStop(autoStopMs);
       return;
     }
 
@@ -109,8 +334,10 @@
       source.connect(processor);
       processor.connect(audioContext.destination);
       setRecordingUi(true);
+      armAutoStop(autoStopMs);
       vscode.postMessage({ type: "recordingStarted" });
     } catch (err) {
+      clearAutoStop();
       setRecordingUi(false);
       vscode.postMessage({
         type: "micFailed",
@@ -120,6 +347,7 @@
   }
 
   function stopRecording() {
+    clearAutoStop();
     if (nativeMode) {
       setRecordingUi(false);
       vscode.postMessage({ type: "stopNative" });
@@ -270,19 +498,78 @@
   });
 
   discardBtn.addEventListener("click", () => {
+    const text = (transcriptEdit.value || "").trim();
     setReviewUi(false);
     setText(transcriptEl, "", true);
-    vscode.postMessage({ type: "discardTranscript" });
+    vscode.postMessage({ type: "discardTranscript", text: text });
   });
 
-  copyBtn.addEventListener("click", async () => {
-    const text = lastResultText || resultEl.textContent || "";
-    try {
-      await navigator.clipboard.writeText(text);
-      statusEl.textContent = "copied";
-    } catch (_) {
-      statusEl.textContent = "copy-failed";
+  showHistoryBtn.addEventListener("click", () => {
+    historyOffset = 0;
+    openHistory(true);
+  });
+
+  hideHistoryBtn.addEventListener("click", () => {
+    historyOpen = false;
+    showHistoryBtn.classList.remove("hidden");
+    hideHistoryBtn.classList.add("hidden");
+    historyActions.classList.add("hidden");
+    loadMoreHistoryBtn.classList.add("hidden");
+    historyEl.classList.add("empty");
+    historyEl.textContent = "Click Show transcripts to list recent inputs.";
+    delete historyEl.dataset.loaded;
+  });
+
+  loadMoreHistoryBtn.addEventListener("click", () => {
+    openHistory(false);
+  });
+
+  historyEl.addEventListener("click", (event) => {
+    const item = event.target.closest(".hist-item");
+    if (!item || !item.dataset.transcript) {
+      return;
     }
+    const text = item.dataset.transcript;
+    lastTranscript = text;
+    setReviewUi(true, text);
+    vscode.postMessage({ type: "reuseHistory", text: text });
+  });
+
+  copyBtn.addEventListener("click", () => {
+    void copyText(lastResultText || resultEl.textContent || "");
+  });
+
+  copyTranscriptBtn.addEventListener("click", () => {
+    const text = reviewMode
+      ? transcriptEdit.value || ""
+      : lastTranscript || transcriptEl.textContent || "";
+    void copyText(text === "—" ? "" : text);
+  });
+
+  copyIntentBtn.addEventListener("click", () => {
+    const parts = [];
+    if (lastIntentMeta && lastIntentMeta !== "—") {
+      parts.push(lastIntentMeta);
+    }
+    if (lastSummary && lastSummary !== "—") {
+      parts.push(lastSummary);
+    }
+    void copyText(parts.join("\n"));
+  });
+
+  langBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "cycleLanguage" });
+  });
+
+  alwaysApproveBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "toggleAlwaysApprove" });
+  });
+
+  workspaceSelect.addEventListener("change", () => {
+    vscode.postMessage({
+      type: "selectWorkspace",
+      path: workspaceSelect.value || "",
+    });
   });
 
   retryBtn.addEventListener("click", () => {
@@ -307,23 +594,91 @@
     }
     if (msg.type === "startRecording") {
       nativeMode = false;
+      if (typeof msg.autoStopMs === "number") {
+        autoStopMs = msg.autoStopMs;
+      }
       startRecording();
     } else if (msg.type === "stopRecording") {
       stopRecording();
     } else if (msg.type === "nativeRecording") {
       nativeMode = !!msg.active;
-      setRecordingUi(!!msg.active);
+      if (typeof msg.autoStopMs === "number") {
+        autoStopMs = msg.autoStopMs;
+      }
+      if (msg.active) {
+        setRecordingUi(true);
+        // Host owns native auto-stop timer; still show countdown label.
+        armAutoStop(autoStopMs);
+      } else {
+        clearAutoStop();
+        setRecordingUi(false);
+      }
     } else if (msg.type === "plan") {
       planBadge.textContent = msg.plan || "free";
       planBadge.classList.toggle("pro", msg.plan === "pro");
+    } else if (msg.type === "settings") {
+      applySettings(msg);
+    } else if (msg.type === "progress") {
+      renderProgress(msg.steps || [], msg.current || "");
+    } else if (msg.type === "historyPage") {
+      historyPro = msg.pro !== false;
+      historyTotal = typeof msg.total === "number" ? msg.total : historyTotal;
+      historyHasMore = !!msg.hasMore;
+      const items = msg.items || [];
+      if (msg.reset) {
+        historyOffset = 0;
+        renderHistoryItems(items, false);
+        historyOffset = items.length;
+        historyOpen = true;
+        showHistoryBtn.classList.add("hidden");
+        hideHistoryBtn.classList.remove("hidden");
+        historyActions.classList.remove("hidden");
+        historyEl.dataset.loaded = "1";
+      } else {
+        renderHistoryItems(items, true);
+        historyOffset += items.length;
+      }
+      setHistoryUi(historyPro, historyTotal);
+      if (historyOpen && historyHasMore) {
+        loadMoreHistoryBtn.classList.remove("hidden");
+      } else {
+        loadMoreHistoryBtn.classList.add("hidden");
+      }
+      if (msg.reset && historyTotal === 0 && historyPro) {
+        historyEl.classList.add("empty");
+        historyEl.textContent = "No transcripts yet.";
+      }
     } else if (msg.type === "state" && msg.state) {
       const s = msg.state;
       statusEl.textContent = s.status || "idle";
-      setBusyUi(s.status === "routing" || s.status === "running" || s.status === "transcribing");
+      setBusyUi(
+        s.status === "routing" ||
+          s.status === "running" ||
+          s.status === "transcribing"
+      );
+
+      if (s.status !== "running" && s.status !== "routing") {
+        if (s.status === "done" || s.status === "error" || s.status === "idle") {
+          // keep last progress visible briefly on done; hide on idle/error
+          if (s.status === "idle" || s.status === "error") {
+            renderProgress([], "");
+          }
+        }
+      }
 
       if (s.plan) {
         planBadge.textContent = s.plan;
         planBadge.classList.toggle("pro", s.plan === "pro");
+      }
+
+      if (
+        typeof s.historyPro === "boolean" ||
+        typeof s.historyTotal === "number"
+      ) {
+        setHistoryUi(
+          typeof s.historyPro === "boolean" ? s.historyPro : historyPro,
+          typeof s.historyTotal === "number" ? s.historyTotal : historyTotal
+        );
       }
 
       if (s.status === "review") {
@@ -332,7 +687,11 @@
       } else {
         if (reviewMode && s.status !== "routing" && s.status !== "running") {
           setReviewUi(false);
-        } else if (s.status === "routing" || s.status === "running" || s.status === "done") {
+        } else if (
+          s.status === "routing" ||
+          s.status === "running" ||
+          s.status === "done"
+        ) {
           setReviewUi(false);
           setText(transcriptEl, s.transcript, !s.transcript);
           lastTranscript = s.transcript || lastTranscript;
@@ -342,12 +701,17 @@
       }
 
       if (s.intent) {
-        intentMetaEl.textContent =
+        lastIntentMeta =
           s.intent +
-          (s.confidence ? ` · confidence ${(s.confidence * 100).toFixed(0)}%` : "");
+          (s.confidence
+            ? " · confidence " + (s.confidence * 100).toFixed(0) + "%"
+            : "");
+        intentMetaEl.textContent = lastIntentMeta;
       } else {
+        lastIntentMeta = "";
         intentMetaEl.textContent = "—";
       }
+      lastSummary = s.summary || "";
       setText(summaryEl, s.summary, !s.summary);
 
       lastResultText = s.result || "";
@@ -355,11 +719,6 @@
         setHtml(resultEl, s.resultHtml, !s.resultHtml);
       } else {
         setText(resultEl, s.result, !s.result);
-      }
-
-      if (s.historyHtml) {
-        historyEl.classList.remove("empty");
-        historyEl.innerHTML = s.historyHtml;
       }
 
       if (s.error) {
@@ -373,6 +732,7 @@
         setRecordingUi(true);
       } else if (s.status !== "idle") {
         if (!recording) {
+          clearAutoStop();
           micLabel.textContent = "Click to talk";
           micBtn.classList.remove("recording");
         }

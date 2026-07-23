@@ -2,7 +2,6 @@ import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
 import { chat } from "../llm/provider";
-import { getConfig } from "../config";
 import {
   WorkspaceContext,
   formatContextForPrompt,
@@ -35,7 +34,11 @@ export async function handleEdit(
   transcript: string,
   ctx: WorkspaceContext,
   payload: Record<string, unknown>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: {
+    alwaysApprove?: boolean;
+    onAwaitingConfirm?: () => void;
+  }
 ): Promise<EditResult> {
   const instruction =
     typeof payload.instruction === "string" && payload.instruction.trim()
@@ -135,8 +138,9 @@ Rules:
     }
 
     materialized.push({ ...edit, path: abs, content: after });
+    const rootForRel = ctx.preferredRoot || ctx.workspaceFolders[0] || "";
     diffs.push(
-      unifiedDiff(path.relative(ctx.workspaceFolders[0] || "", abs) || abs, before, after)
+      unifiedDiff(path.relative(rootForRel, abs) || abs, before, after)
     );
   }
 
@@ -152,6 +156,7 @@ Rules:
   }
 
   if (dirtyConflicts.length) {
+    options?.onAwaitingConfirm?.();
     const choice = await vscode.window.showWarningMessage(
       `These files have unsaved changes and may conflict:\n${dirtyConflicts.join("\n")}\nApply anyway using the buffer contents as base?`,
       { modal: true },
@@ -172,14 +177,15 @@ Rules:
   }
 
   const preview = formatDiffPreview(diffs);
-  const config = getConfig();
   const title =
     materialized.length > 1
       ? `Apply ${materialized.length} file edits?`
       : `Apply edit to ${path.basename(materialized[0].path)}?`;
 
-  const alwaysConfirm = config.editConfirmMultiFile || materialized.length === 1;
-  if (alwaysConfirm) {
+  // Always ask unless Always approve edits is enabled.
+  const skipConfirm = options?.alwaysApprove === true;
+  if (!skipConfirm) {
+    options?.onAwaitingConfirm?.();
     const choice = await vscode.window.showWarningMessage(
       `${title}\n\n${preview}`,
       { modal: true },
@@ -246,13 +252,16 @@ Rules:
   }
 
   await track("edit_accept", { files: materialized.length });
+  const autoNote = skipConfirm
+    ? " (auto-approved — Always approve edits is on)."
+    : "";
   return {
     instruction,
     edits: materialized,
     diffs,
     applied: true,
     skipped: false,
-    message: `Applied ${materialized.length} file edit(s). Use Undo (Ctrl/Cmd+Z) in each file if needed.`,
+    message: `Applied ${materialized.length} file edit(s)${autoNote} Use Undo (Ctrl/Cmd+Z) in each file if needed.`,
   };
 }
 

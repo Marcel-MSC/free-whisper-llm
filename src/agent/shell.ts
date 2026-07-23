@@ -18,7 +18,8 @@ export async function handleShell(
   transcript: string,
   ctx: WorkspaceContext,
   payload: Record<string, unknown>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: { onAwaitingConfirm?: () => void }
 ): Promise<ShellResult> {
   const goal =
     typeof payload.goal === "string" && payload.goal.trim()
@@ -88,6 +89,7 @@ Rules:
     !assessment.allowAutoRun || config.shellConfirm || assessment.risk !== "low";
 
   if (mustConfirm) {
+    options?.onAwaitingConfirm?.();
     const choice = await vscode.window.showWarningMessage(
       `Run this ${parsed.shell} command? [${assessment.risk} risk]\n\n${parsed.command}` +
         (assessment.reasons.length
@@ -109,7 +111,7 @@ Rules:
     }
   }
 
-  const cwd = ctx.workspaceFolders[0];
+  const cwd = ctx.preferredRoot || ctx.workspaceFolders[0];
   const terminal =
     vscode.window.terminals.find((t) => t.name === "Voice Agent") ??
     vscode.window.createTerminal({

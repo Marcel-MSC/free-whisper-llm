@@ -90,7 +90,7 @@
       },
       {
         "command": "voiceAgent.clearHistory",
-        "title": "Voice Agent: Clear History"
+        "title": "Voice Agent: Clear Transcript History"
       },
       {
         "command": "voiceAgent.showAnalytics",
@@ -181,9 +181,10 @@
             "es",
             "fr",
             "de",
+            "it",
             "auto"
           ],
-          "description": "Speech recognition language. Use auto to detect."
+          "description": "Speech recognition (Whisper) language. Use auto to detect. Does not change the LLM; Llama 3.2 officially supports en, de, fr, it, pt, hi, es, th."
         },
         "voiceAgent.whisper.pythonPath": {
           "type": "string",
@@ -214,6 +215,13 @@
             "Record via parecord/arecord/ffmpeg on the extension host (best for WSL)."
           ],
           "description": "How to capture microphone audio."
+        },
+        "voiceAgent.audio.autoStopMs": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 2000,
+          "maximum": 30000,
+          "description": "Automatically stop microphone recording after this many milliseconds (default 5000)."
         },
         "voiceAgent.llm.provider": {
           "type": "string",
@@ -261,7 +269,7 @@
         "voiceAgent.edit.confirmMultiFile": {
           "type": "boolean",
           "default": true,
-          "description": "Ask before applying edits (diff preview is always shown)."
+          "description": "Legacy setting; edits always confirm unless Always approve edits is enabled in the panel."
         },
         "voiceAgent.confidenceThreshold": {
           "type": "number",
@@ -275,6 +283,19 @@
           "default": true,
           "description": "Write privacy-safe local analytics (no audio/source/transcripts) to ~/.local/share/voice-agent/analytics.jsonl."
         },
+        "voiceAgent.history.maxEntries": {
+          "type": "number",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 500,
+          "description": "Maximum number of Pro session history entries kept locally (oldest dropped first)."
+        },
+        "voiceAgent.history.recordDrafts": {
+          "type": "boolean",
+          "default": true,
+          "description": "When Pro session history is available, also record transcribed/typed drafts and discarded prompts (not only completed runs)."
+        },
+
         "voiceAgent.billing.checkoutUrl": {
           "type": "string",
           "default": "https://example.com/voice-agent/checkout",
@@ -298,10 +319,10 @@
     "smoke:package": "npm run package && node scripts/smoke_package.js"
   },
   "devDependencies": {
-    "@types/node": "^20.11.0",
+    "@types/node": "^20.19.43",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.6.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.9.3"
   },
   "capabilities": {
     "untrustedWorkspaces": {

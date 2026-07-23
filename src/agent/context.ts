@@ -16,6 +16,8 @@ import { hasFeature } from "../license/entitlements";
 
 export interface WorkspaceContext {
   workspaceFolders: string[];
+  /** Root used for relative path resolution (selected workspace). */
+  preferredRoot?: string;
   activeFile?: string;
   languageId?: string;
   selection?: string;
@@ -26,19 +28,28 @@ export interface WorkspaceContext {
   proContext: boolean;
 }
 
+export interface GatherContextOptions {
+  preferredRoot?: string;
+  onSearch?: () => void;
+}
+
 const MAX_EXCERPT = 6000;
 const MAX_SELECTION = 4000;
 
 export async function gatherContext(
-  transcript?: string
+  transcript?: string,
+  options?: GatherContextOptions
 ): Promise<WorkspaceContext> {
-  const folders = vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [];
+  const folders =
+    vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [];
+  const preferredRoot = pickPreferredRoot(folders, options?.preferredRoot);
   const editor = vscode.window.activeTextEditor;
   const shellKind = detectShell();
   const proContext = await hasFeature("codebaseSearch");
 
   let base: WorkspaceContext = {
     workspaceFolders: folders,
+    preferredRoot,
     shellKind,
     proContext,
   };
@@ -74,6 +85,7 @@ export async function gatherContext(
   }
 
   if (proContext && transcript && folders.length) {
+    options?.onSearch?.();
     const terms = extractSearchTerms(transcript);
     const hits: SearchHit[] = [];
     for (const term of terms.slice(0, 3)) {
@@ -82,7 +94,6 @@ export async function gatherContext(
         break;
       }
     }
-    // Deduplicate by path+line
     const seen = new Set<string>();
     const unique = hits.filter((h) => {
       const k = `${h.path}:${h.line}`;
@@ -110,12 +121,33 @@ export async function gatherContext(
   return base;
 }
 
+function pickPreferredRoot(
+  folders: string[],
+  preferred?: string
+): string | undefined {
+  if (!folders.length) {
+    return undefined;
+  }
+  if (preferred) {
+    const preferredCanon = canonicalizePath(preferred);
+    const match = folders.find((f) => canonicalizePath(f) === preferredCanon);
+    if (match) {
+      return match;
+    }
+  }
+  return folders[0];
+}
+
 export function detectShell(): "bash" | "powershell" | "cmd" {
   const profile = vscode.env.shell.toLowerCase();
   if (profile.includes("powershell") || profile.includes("pwsh")) {
     return "powershell";
   }
-  if (profile.includes("cmd.exe") || profile.endsWith("\\cmd") || profile.endsWith("/cmd")) {
+  if (
+    profile.includes("cmd.exe") ||
+    profile.endsWith("\\cmd") ||
+    profile.endsWith("/cmd")
+  ) {
     return "cmd";
   }
   return "bash";
@@ -124,6 +156,9 @@ export function detectShell(): "bash" | "powershell" | "cmd" {
 export function formatContextForPrompt(ctx: WorkspaceContext): string {
   const lines: string[] = [];
   lines.push(`Shell: ${ctx.shellKind}`);
+  if (ctx.preferredRoot) {
+    lines.push(`Selected workspace root: ${ctx.preferredRoot}`);
+  }
   if (ctx.workspaceFolders.length) {
     lines.push(
       `Workspace folders:\n${ctx.workspaceFolders.map((p) => `- ${p}`).join("\n")}`
@@ -165,7 +200,11 @@ export function resolveWorkspacePath(
   relativeOrAbsolute: string,
   ctx: WorkspaceContext
 ): string {
-  return resolveUnderRoots(relativeOrAbsolute, ctx.workspaceFolders);
+  return resolveUnderRoots(
+    relativeOrAbsolute,
+    ctx.workspaceFolders,
+    ctx.preferredRoot
+  );
 }
 
 export function isPathInsideWorkspace(

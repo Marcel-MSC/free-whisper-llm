@@ -1,8 +1,18 @@
 import * as vscode from "vscode";
 
 export type LlmProvider = "ollama" | "openai" | "anthropic";
-export type WhisperLanguage = "pt" | "en" | "es" | "fr" | "de" | "auto";
+export type WhisperLanguage = "pt" | "en" | "es" | "fr" | "de" | "it" | "auto";
 export type AudioCaptureMode = "auto" | "webview" | "native";
+
+export const WHISPER_LANGUAGES: WhisperLanguage[] = [
+  "pt",
+  "en",
+  "es",
+  "fr",
+  "de",
+  "it",
+  "auto",
+];
 
 export interface VoiceAgentConfig {
   whisperModel: string;
@@ -10,6 +20,7 @@ export interface VoiceAgentConfig {
   pythonPath: string;
   scriptPath: string;
   audioCaptureMode: AudioCaptureMode;
+  audioAutoStopMs: number;
   llmProvider: LlmProvider;
   llmBaseUrl: string;
   llmModel: string;
@@ -22,16 +33,20 @@ export interface VoiceAgentConfig {
   llmRetries: number;
   warmWhisper: boolean;
   analyticsEnabled: boolean;
+  historyMaxEntries: number;
+  historyRecordDrafts: boolean;
 }
 
 export function getConfig(): VoiceAgentConfig {
   const cfg = vscode.workspace.getConfiguration("voiceAgent");
+  const autoStop = cfg.get<number>("audio.autoStopMs", 5000);
   return {
     whisperModel: cfg.get<string>("whisper.model", "base"),
     whisperLanguage: cfg.get<WhisperLanguage>("whisper.language", "pt"),
     pythonPath: cfg.get<string>("whisper.pythonPath", "python3"),
     scriptPath: cfg.get<string>("whisper.scriptPath", ""),
     audioCaptureMode: cfg.get<AudioCaptureMode>("audio.captureMode", "auto"),
+    audioAutoStopMs: clampAutoStop(autoStop),
     llmProvider: cfg.get<LlmProvider>("llm.provider", "ollama"),
     llmBaseUrl: cfg.get<string>("llm.baseUrl", "http://127.0.0.1:11434"),
     llmModel: cfg.get<string>("llm.model", "llama3.2"),
@@ -43,5 +58,22 @@ export function getConfig(): VoiceAgentConfig {
     llmRetries: cfg.get<number>("llm.retries", 2),
     warmWhisper: cfg.get<boolean>("whisper.warmSidecar", true),
     analyticsEnabled: cfg.get<boolean>("analytics.enabled", true),
+    historyMaxEntries: cfg.get<number>("history.maxEntries", 100),
+    historyRecordDrafts: cfg.get<boolean>("history.recordDrafts", true),
   };
+}
+
+function clampAutoStop(n: number): number {
+  if (!Number.isFinite(n)) {
+    return 5000;
+  }
+  return Math.min(30_000, Math.max(2000, Math.floor(n)));
+}
+
+export async function setWhisperLanguage(
+  language: WhisperLanguage
+): Promise<void> {
+  await vscode.workspace
+    .getConfiguration("voiceAgent")
+    .update("whisper.language", language, vscode.ConfigurationTarget.Global);
 }

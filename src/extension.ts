@@ -3,11 +3,19 @@ import { VoiceAgentPanel } from "./ui/panel";
 import { ensureWhisperReady, setupWhisper, WhisperError } from "./stt/whisper";
 import { stopWhisperSidecar } from "./stt/whisperSidecar";
 import { initSecrets, setApiKey, clearApiKey, hasApiKey } from "./secrets";
-import { initEntitlements, activateLicense, deactivateLicense, getEntitlement, checkoutUrl, customerPortalUrl } from "./license/entitlements";
-import { initHistory, clearHistory } from "./history";
+import {
+  initEntitlements,
+  activateLicense,
+  deactivateLicense,
+  getEntitlement,
+  checkoutUrl,
+  customerPortalUrl,
+} from "./license/entitlements";
+import { initHistory, clearHistory, configureHistory } from "./history";
 import { ensurePrivacyConsent, resetPrivacyConsent, getPrivacyDisclosure } from "./privacy";
 import { showHealthCheck } from "./health";
 import { track, summarizeAnalytics } from "./analytics";
+import { getConfig } from "./config";
 
 let statusBarItem: vscode.StatusBarItem;
 
@@ -15,6 +23,10 @@ export function activate(context: vscode.ExtensionContext): void {
   initSecrets(context.secrets);
   initEntitlements(context.secrets, context.globalState);
   initHistory(context.globalState);
+  configureHistory({
+    maxEntries: () => getConfig().historyMaxEntries,
+    recordDrafts: () => getConfig().historyRecordDrafts,
+  });
 
   statusBarItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
@@ -171,7 +183,8 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("voiceAgent.clearHistory", async () => {
       await clearHistory();
-      void vscode.window.showInformationMessage("Session history cleared.");
+      VoiceAgentPanel.notifyHistoryCleared();
+      void vscode.window.showInformationMessage("Transcript history cleared.");
     }),
     vscode.commands.registerCommand("voiceAgent.showAnalytics", async () => {
       const summary = await summarizeAnalytics();

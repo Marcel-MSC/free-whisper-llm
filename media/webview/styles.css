@@ -241,9 +241,26 @@ body {
   font-size: 0.85rem;
 }
 
+.history-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 0.75em;
+}
+
+.history-count {
+  font-size: 0.8rem;
+}
+
 .hist-item {
   padding: 8px 0;
   border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.hist-item:hover {
+  background: var(--bg);
 }
 
 .hist-item:last-child {
@@ -258,6 +275,76 @@ body {
 
 .hist-text {
   font-size: 0.85rem;
+  white-space: pre-wrap;
+}
+
+.hist-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.hist-summary {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.hist-error {
+  font-size: 0.78rem;
+  color: var(--danger, #c44);
+  margin-top: 2px;
+}
+
+.header-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 0.75em;
+}
+
+.workspace-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.workspace-select {
+  max-width: 220px;
+  background: var(--bg);
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+.btn-inline {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.btn.active {
+  border-color: var(--accent, #3b82f6);
+  color: var(--accent, #3b82f6);
+}
+
+.progress-list {
+  margin: 0;
+  padding-left: 1.25em;
+  font-size: 0.85rem;
+}
+
+.progress-list li.current {
+  font-weight: 600;
+}
+
+.progress-card h2 {
+  margin-bottom: 0.5em;
 }
 
 .muted {

@@ -15,13 +15,37 @@ import {
   stopNativeCapture,
   NativeCaptureError,
 } from "../audio/nativeCapture";
-import { getConfig } from "../config";
+import { getConfig, setWhisperLanguage, WHISPER_LANGUAGES, type WhisperLanguage } from "../config";
 import { ensurePrivacyConsent } from "../privacy";
-import { pushHistory, getHistory } from "../history";
+import {
+  pushHistory,
+  getHistoryPage,
+  HISTORY_PAGE_SIZE,
+  recordDraftsEnabled,
+  historyDisplayTitle,
+  type HistoryEntry,
+  type HistoryKind,
+} from "../history";
 import { hasFeature, getEntitlement } from "../license/entitlements";
 import { track } from "../analytics";
 import { renderMarkdown } from "../markdown";
 import { LlmError } from "../llm/provider";
+import type { AgentProgressStep } from "../agent/run";
+
+const SELECTED_WS_KEY = "voiceAgent.selectedWorkspace.v1";
+const ALWAYS_APPROVE_KEY = "voiceAgent.alwaysApproveEdits.v1";
+
+const PROGRESS_LABELS: Record<AgentProgressStep, string> = {
+  gathering_context: "Gathering context…",
+  routing: "Routing intent…",
+  searching: "Searching workspace…",
+  planning: "Planning…",
+  asking: "Answering…",
+  editing: "Preparing edits…",
+  shell: "Preparing shell command…",
+  awaiting_confirm: "Waiting for confirmation…",
+  done: "Done",
+};
 
 export type PanelStatus =
   | "idle"
@@ -43,8 +67,11 @@ interface PanelState {
   resultHtml: string;
   error: string;
   plan: string;
-  historyHtml: string;
+  historyTotal: number;
+  historyPro: boolean;
 }
+
+type PromptSource = "voice" | "typed";
 
 type ActiveMode = "webview" | "native";
 
@@ -62,6 +89,12 @@ export class VoiceAgentPanel {
   private onRecordingChange?: (recording: boolean) => void;
   private abort?: AbortController;
   private firstSuccessTracked = false;
+  /** How the current review transcript was produced (voice STT vs typed). */
+  private promptSource: PromptSource = "typed";
+  /** Text being run (for cancel/error history). */
+  private pendingTranscript = "";
+  private nativeAutoStopTimer?: ReturnType<typeof setTimeout>;
+  private progressSteps: Array<{ step: AgentProgressStep; label: string }> = [];
 
   private constructor(
     panel: vscode.WebviewPanel,
@@ -114,6 +147,19 @@ export class VoiceAgentPanel {
     return VoiceAgentPanel.current;
   }
 
+  /** Notify open panel that history was cleared (command palette). */
+  public static notifyHistoryCleared(): void {
+    VoiceAgentPanel.current?.post({
+      type: "historyPage",
+      offset: 0,
+      limit: HISTORY_PAGE_SIZE,
+      total: 0,
+      hasMore: false,
+      items: [],
+      reset: true,
+    });
+  }
+
   public async startRecording(): Promise<void> {
     const consented = await ensurePrivacyConsent(this.context);
     if (!consented) {
@@ -132,13 +178,14 @@ export class VoiceAgentPanel {
     this.activeMode = "webview";
     this.recording = true;
     this.onRecordingChange?.(true);
-    this.post({ type: "startRecording" });
+    const autoStopMs = config.audioAutoStopMs;
+    this.post({ type: "startRecording", autoStopMs });
     await this.updateState({
       status: "recording",
       transcript: "",
       intent: "",
       confidence: 0,
-      summary: "",
+      summary: `Listening… auto-stops in ${Math.round(autoStopMs / 1000)}s`,
       result: "",
       resultHtml: "",
       error: "",
@@ -146,6 +193,7 @@ export class VoiceAgentPanel {
   }
 
   public async stopRecording(): Promise<void> {
+    this.clearNativeAutoStop();
     if (this.activeMode === "native" || isNativeCaptureActive()) {
       await this.stopNative();
       return;
@@ -168,18 +216,28 @@ export class VoiceAgentPanel {
       this.activeMode = "native";
       this.recording = true;
       this.onRecordingChange?.(true);
-      this.post({ type: "nativeRecording", active: true });
+      const autoStopMs = getConfig().audioAutoStopMs;
+      this.post({
+        type: "nativeRecording",
+        active: true,
+        autoStopMs,
+      });
+      this.clearNativeAutoStop();
+      this.nativeAutoStopTimer = setTimeout(() => {
+        void this.stopRecording();
+      }, autoStopMs);
       await this.updateState({
         status: "recording",
         transcript: "",
         intent: "",
         confidence: 0,
-        summary: `Native mic (${backend}) — speak, then click stop`,
+        summary: `Native mic (${backend}) — auto-stops in ${Math.round(autoStopMs / 1000)}s`,
         result: "",
         resultHtml: "",
         error: "",
       });
     } catch (err) {
+      this.clearNativeAutoStop();
       const message =
         err instanceof NativeCaptureError
           ? err.message
@@ -203,6 +261,7 @@ export class VoiceAgentPanel {
   }
 
   private async stopNative(): Promise<void> {
+    this.clearNativeAutoStop();
     try {
       this.post({ type: "nativeRecording", active: false });
       const wavPath = await stopNativeCapture();
@@ -232,6 +291,13 @@ export class VoiceAgentPanel {
     }
   }
 
+  private clearNativeAutoStop(): void {
+    if (this.nativeAutoStopTimer) {
+      clearTimeout(this.nativeAutoStopTimer);
+      this.nativeAutoStopTimer = undefined;
+    }
+  }
+
   private async onMessage(message: unknown): Promise<void> {
     if (!message || typeof message !== "object") {
       return;
@@ -242,6 +308,7 @@ export class VoiceAgentPanel {
       case "ready":
         this.post({ type: "ping" });
         await this.pushPlanBadge();
+        await this.pushPanelSettings();
         break;
       case "recordingStarted":
         this.recording = true;
@@ -319,7 +386,17 @@ export class VoiceAgentPanel {
           await this.runWithTranscript(msg.text);
         }
         break;
-      case "discardTranscript":
+      case "discardTranscript": {
+        const discarded =
+          typeof msg.text === "string" ? msg.text.trim() : "";
+        if (discarded && recordDraftsEnabled()) {
+          await this.recordHistory({
+            kind: "draft_discarded",
+            transcript: discarded,
+            summary: "Discarded draft",
+          });
+        }
+        this.pendingTranscript = "";
         await this.updateState({
           status: "idle",
           transcript: "",
@@ -331,11 +408,12 @@ export class VoiceAgentPanel {
           error: "",
         });
         break;
+      }
       case "cancel":
         this.cancelRunning();
         await this.updateState({
           status: "idle",
-          transcript: "",
+          transcript: this.pendingTranscript,
           intent: "",
           confidence: 0,
           summary: "Cancelled.",
@@ -345,6 +423,7 @@ export class VoiceAgentPanel {
         });
         break;
       case "typePrompt":
+        this.promptSource = "typed";
         await this.updateState({
           status: "review",
           transcript: typeof msg.text === "string" ? msg.text : "",
@@ -355,6 +434,49 @@ export class VoiceAgentPanel {
           resultHtml: "",
           error: "",
         });
+        break;
+      case "loadHistory": {
+        const offset =
+          typeof msg.offset === "number" && Number.isFinite(msg.offset)
+            ? msg.offset
+            : 0;
+        const limit =
+          typeof msg.limit === "number" && Number.isFinite(msg.limit)
+            ? msg.limit
+            : HISTORY_PAGE_SIZE;
+        await this.sendHistoryPage(offset, limit, !!msg.reset);
+        break;
+      }
+      case "reuseHistory":
+        if (typeof msg.text === "string" && msg.text.trim()) {
+          this.promptSource = "typed";
+          await this.updateState({
+            status: "review",
+            transcript: msg.text.trim(),
+            intent: "",
+            confidence: 0,
+            summary: "Loaded from transcript history — edit if needed, then Send.",
+            result: "",
+            resultHtml: "",
+            error: "",
+          });
+        }
+        break;
+      case "cycleLanguage":
+        await this.cycleLanguage();
+        break;
+      case "setLanguage":
+        if (typeof msg.language === "string") {
+          await this.setLanguage(msg.language);
+        }
+        break;
+      case "selectWorkspace":
+        if (typeof msg.path === "string") {
+          await this.setSelectedWorkspace(msg.path);
+        }
+        break;
+      case "toggleAlwaysApprove":
+        await this.toggleAlwaysApprove();
         break;
     }
   }
@@ -414,6 +536,15 @@ export class VoiceAgentPanel {
     const { text } = await transcribeWav(this.extensionPath, wavPath);
     await track("transcribe_ok", { ms: Date.now() - start });
 
+    this.promptSource = "voice";
+    if (text.trim() && recordDraftsEnabled()) {
+      await this.recordHistory({
+        kind: "draft_transcribed",
+        transcript: text.trim(),
+        summary: "Voice transcript (review)",
+      });
+    }
+
     await this.updateState({
       status: "review",
       transcript: text,
@@ -447,21 +578,20 @@ export class VoiceAgentPanel {
       return;
     }
 
+    if (this.promptSource === "typed" && recordDraftsEnabled()) {
+      await this.recordHistory({
+        kind: "draft_typed",
+        transcript: text,
+        summary: "Typed prompt",
+      });
+    }
+
+    this.pendingTranscript = text;
     this.abort?.abort();
     this.abort = new AbortController();
+    this.progressSteps = [];
 
     try {
-      await this.updateState({
-        status: "routing",
-        transcript: text,
-        intent: "",
-        confidence: 0,
-        summary: "",
-        result: "",
-        resultHtml: "",
-        error: "",
-      });
-
       await this.updateState({
         status: "running",
         transcript: text,
@@ -472,17 +602,33 @@ export class VoiceAgentPanel {
         resultHtml: "",
         error: "",
       });
+      this.postProgress();
 
-      const run = await runAgent(text, { signal: this.abort.signal });
+      const selectedRoot =
+        this.context.globalState.get<string>(SELECTED_WS_KEY) || undefined;
+      const alwaysApprove =
+        this.context.globalState.get<boolean>(ALWAYS_APPROVE_KEY) === true;
 
-      if (await hasFeature("sessionHistory")) {
-        await pushHistory({
-          transcript: run.transcript,
-          intent: run.routed.intent,
-          summary: run.routed.summary,
-          resultPreview: run.resultMarkdown,
-        });
-      }
+      const run = await runAgent(text, {
+        signal: this.abort.signal,
+        selectedWorkspaceRoot: selectedRoot,
+        alwaysApproveEdits: alwaysApprove,
+        onProgress: (step) => {
+          this.progressSteps.push({
+            step,
+            label: PROGRESS_LABELS[step] || step,
+          });
+          this.postProgress();
+        },
+      });
+
+      await this.recordHistory({
+        kind: "run_success",
+        transcript: run.transcript,
+        intent: run.routed.intent,
+        summary: run.routed.summary,
+        resultPreview: run.resultMarkdown,
+      });
 
       if (!this.firstSuccessTracked) {
         this.firstSuccessTracked = true;
@@ -501,6 +647,11 @@ export class VoiceAgentPanel {
       });
     } catch (err) {
       if (err instanceof Error && /cancel|abort/i.test(err.message)) {
+        await this.recordHistory({
+          kind: "run_cancelled",
+          transcript: text,
+          summary: "Cancelled",
+        });
         await this.updateState({
           status: "idle",
           transcript: text,
@@ -513,13 +664,28 @@ export class VoiceAgentPanel {
         });
         return;
       }
-      this.showErr(err);
+      const message =
+        err instanceof WhisperError ||
+        err instanceof NativeCaptureError ||
+        err instanceof LlmError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      await this.recordHistory({
+        kind: "run_error",
+        transcript: text,
+        summary: "Run failed",
+        error: message,
+      });
+      this.showErr(err, text);
     } finally {
       this.abort = undefined;
+      this.pendingTranscript = "";
     }
   }
 
-  private showErr(err: unknown): void {
+  private showErr(err: unknown, transcript = ""): void {
     const message =
       err instanceof WhisperError ||
       err instanceof NativeCaptureError ||
@@ -530,7 +696,7 @@ export class VoiceAgentPanel {
           : String(err);
     void this.updateState({
       status: "error",
-      transcript: "",
+      transcript,
       intent: "",
       confidence: 0,
       summary: "",
@@ -550,25 +716,142 @@ export class VoiceAgentPanel {
     });
   }
 
-  private async updateState(partial: Omit<PanelState, "plan" | "historyHtml"> & {
-    plan?: string;
-    historyHtml?: string;
-  }): Promise<void> {
-    const ent = await getEntitlement();
-    let historyHtml = "";
-    if (await hasFeature("sessionHistory")) {
-      const hist = getHistory().slice(0, 8);
-      historyHtml = hist
-        .map(
-          (h) =>
-            `<div class="hist-item"><div class="hist-meta">${escapeHtml(h.ts.slice(0, 19))} · ${escapeHtml(h.intent)}</div><div class="hist-text">${escapeHtml(h.summary || h.transcript)}</div></div>`
-        )
-        .join("");
+  private async pushPanelSettings(): Promise<void> {
+    const config = getConfig();
+    const folders =
+      vscode.workspace.workspaceFolders?.map((f) => ({
+        name: f.name,
+        path: f.uri.fsPath,
+      })) ?? [];
+    let selected =
+      this.context.globalState.get<string>(SELECTED_WS_KEY) ||
+      folders[0]?.path ||
+      "";
+    if (selected && !folders.some((f) => f.path === selected)) {
+      selected = folders[0]?.path || "";
+      if (selected) {
+        await this.context.globalState.update(SELECTED_WS_KEY, selected);
+      }
     }
+    const alwaysApprove =
+      this.context.globalState.get<boolean>(ALWAYS_APPROVE_KEY) === true;
+    this.post({
+      type: "settings",
+      language: config.whisperLanguage,
+      languages: WHISPER_LANGUAGES,
+      autoStopMs: config.audioAutoStopMs,
+      workspaces: folders,
+      selectedWorkspace: selected,
+      alwaysApproveEdits: alwaysApprove,
+    });
+  }
+
+  private postProgress(): void {
+    this.post({
+      type: "progress",
+      steps: this.progressSteps,
+      current: this.progressSteps[this.progressSteps.length - 1]?.step || "",
+    });
+  }
+
+  private async cycleLanguage(): Promise<void> {
+    const current = getConfig().whisperLanguage;
+    const idx = WHISPER_LANGUAGES.indexOf(current);
+    const next =
+      WHISPER_LANGUAGES[(idx >= 0 ? idx + 1 : 0) % WHISPER_LANGUAGES.length];
+    await setWhisperLanguage(next);
+    await this.pushPanelSettings();
+  }
+
+  private async setLanguage(language: string): Promise<void> {
+    if (!WHISPER_LANGUAGES.includes(language as WhisperLanguage)) {
+      return;
+    }
+    await setWhisperLanguage(language as WhisperLanguage);
+    await this.pushPanelSettings();
+  }
+
+  private async setSelectedWorkspace(folderPath: string): Promise<void> {
+    const folders =
+      vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [];
+    if (folderPath && !folders.includes(folderPath)) {
+      return;
+    }
+    await this.context.globalState.update(
+      SELECTED_WS_KEY,
+      folderPath || undefined
+    );
+    await this.pushPanelSettings();
+  }
+
+  private async toggleAlwaysApprove(): Promise<void> {
+    const next = !(
+      this.context.globalState.get<boolean>(ALWAYS_APPROVE_KEY) === true
+    );
+    await this.context.globalState.update(ALWAYS_APPROVE_KEY, next);
+    await this.pushPanelSettings();
+  }
+
+  private async recordHistory(entry: {
+    kind: HistoryKind;
+    transcript: string;
+    intent?: string;
+    summary?: string;
+    resultPreview?: string;
+    error?: string;
+  }): Promise<void> {
+    if (!(await hasFeature("sessionHistory"))) {
+      return;
+    }
+    await pushHistory(entry);
+  }
+
+  private async sendHistoryPage(
+    offset: number,
+    limit: number,
+    reset = false
+  ): Promise<void> {
+    if (!(await hasFeature("sessionHistory"))) {
+      this.post({
+        type: "historyPage",
+        offset: 0,
+        limit: HISTORY_PAGE_SIZE,
+        total: 0,
+        hasMore: false,
+        items: [],
+        reset: true,
+        pro: false,
+      });
+      return;
+    }
+    const page = getHistoryPage(offset, limit);
+    this.post({
+      type: "historyPage",
+      offset: page.offset,
+      limit: page.limit,
+      total: page.total,
+      hasMore: page.hasMore,
+      items: page.entries.map(serializeHistoryItem),
+      reset,
+      pro: true,
+    });
+  }
+
+  private async updateState(
+    partial: Omit<PanelState, "plan" | "historyTotal" | "historyPro"> & {
+      plan?: string;
+      historyTotal?: number;
+      historyPro?: boolean;
+    }
+  ): Promise<void> {
+    const ent = await getEntitlement();
+    const historyPro = await hasFeature("sessionHistory");
+    const historyTotal = historyPro ? getHistoryPage(0, 1).total : 0;
     const state: PanelState = {
       ...partial,
       plan: partial.plan ?? ent.tier,
-      historyHtml: partial.historyHtml ?? historyHtml,
+      historyTotal: partial.historyTotal ?? historyTotal,
+      historyPro: partial.historyPro ?? historyPro,
       resultHtml: partial.resultHtml ?? "",
     };
     this.post({ type: "state", state });
@@ -582,6 +865,7 @@ export class VoiceAgentPanel {
     VoiceAgentPanel.current = undefined;
     this.recording = false;
     this.onRecordingChange?.(false);
+    this.clearNativeAutoStop();
     this.abort?.abort();
     void cancelNativeCapture();
     while (this.disposables.length) {
@@ -614,6 +898,15 @@ export class VoiceAgentPanel {
   <header class="header">
     <h1>Voice Agent <span id="planBadge" class="badge">free</span></h1>
     <p class="subtitle">Speak or type to plan, ask, edit code, or run shell commands.</p>
+    <div class="header-tools">
+      <button id="langBtn" class="btn" type="button" title="Whisper speech language (not the LLM). Llama 3.2: en, de, fr, it, pt, hi, es, th.">Lang: pt</button>
+      <button id="alwaysApproveBtn" class="btn" type="button" title="Skip edit confirmation dialogs">Always approve edits: off</button>
+      <label class="workspace-label">Workspace
+        <select id="workspaceSelect" class="workspace-select">
+          <option value="">Open a folder in Cursor</option>
+        </select>
+      </label>
+    </div>
   </header>
 
   <section class="controls">
@@ -626,8 +919,15 @@ export class VoiceAgentPanel {
     <div id="status" class="status" role="status" aria-live="polite">idle</div>
   </section>
 
+  <section class="card progress-card hidden" id="progressCard">
+    <h2>Progress</h2>
+    <ol id="progressList" class="progress-list"></ol>
+  </section>
+
   <section class="card">
-    <h2>Transcript / Prompt</h2>
+    <h2>Transcript / Prompt
+      <button id="copyTranscriptBtn" class="btn btn-inline" type="button">Copy</button>
+    </h2>
     <pre id="transcript" class="block empty">—</pre>
     <textarea id="transcriptEdit" class="transcript-edit hidden" rows="4" placeholder="Speak, or type a request here…"></textarea>
     <div id="reviewActions" class="review-actions hidden">
@@ -637,23 +937,34 @@ export class VoiceAgentPanel {
   </section>
 
   <section class="card">
-    <h2>Intent</h2>
+    <h2>Intent
+      <button id="copyIntentBtn" class="btn btn-inline" type="button">Copy</button>
+    </h2>
     <div id="intentMeta" class="meta">—</div>
     <pre id="summary" class="block empty">—</pre>
   </section>
 
   <section class="card">
-    <h2>Result</h2>
+    <h2>Result
+      <button id="copyBtn" class="btn btn-inline" type="button">Copy</button>
+    </h2>
     <div id="result" class="block md empty">—</div>
     <div class="review-actions">
-      <button id="copyBtn" class="btn" type="button">Copy result</button>
       <button id="retryBtn" class="btn" type="button">Retry</button>
     </div>
   </section>
 
   <section class="card" id="historyCard">
-    <h2>History <span class="muted">(Pro)</span></h2>
-    <div id="history" class="history empty">Upgrade to Pro for session history.</div>
+    <h2>Transcript history <span class="muted">(Pro)</span></h2>
+    <div id="historyControls" class="history-controls">
+      <button id="showHistoryBtn" class="btn" type="button">Show transcripts</button>
+      <button id="hideHistoryBtn" class="btn hidden" type="button">Hide transcripts</button>
+      <span id="historyCount" class="muted history-count"></span>
+    </div>
+    <div id="history" class="history empty">Upgrade to Pro for transcript history.</div>
+    <div id="historyActions" class="review-actions hidden">
+      <button id="loadMoreHistoryBtn" class="btn hidden" type="button">Load more</button>
+    </div>
   </section>
 
   <section class="card error-card hidden" id="errorCard">
@@ -667,12 +978,18 @@ export class VoiceAgentPanel {
   }
 }
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+function serializeHistoryItem(h: HistoryEntry): Record<string, string> {
+  return {
+    id: h.id,
+    ts: h.ts,
+    kind: h.kind,
+    title: historyDisplayTitle(h),
+    transcript: h.transcript,
+    intent: h.intent,
+    summary: h.summary,
+    resultPreview: h.resultPreview,
+    error: h.error || "",
+  };
 }
 
 function getNonce(): string {

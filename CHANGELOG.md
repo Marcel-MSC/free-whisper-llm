@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### UX improvements
+
+- Agent **progress steps** in the panel (gathering context → routing → intent handler → done).
+- **Workspace** picker among open Cursor/VS Code folders; relative reads/writes use the selected root.
+- **Copy** buttons for transcript, intent, and result.
+- In-panel **Whisper language** button (`pt|en|es|fr|de|it|auto`); does not change the LLM. Docs note Llama 3.2 official languages.
+- Edits always confirm unless **Always approve edits** is on (persisted); shell confirms unchanged.
+- Mic **auto-stop** after `voiceAgent.audio.autoStopMs` (default 5000).
+- Renamed **Transcript history**; list titles use intent/summary resume; Show transcripts / Load more.
+
+### Session history
+
+- Pro history now records voice/typed drafts, discards, and run success/error/cancel (not only successful runs).
+- Panel: **Show transcripts** lists the latest 10 inputs; **Load more** appends 10 at a time; click an item to reuse.
+- Settings: `voiceAgent.history.maxEntries` (default 100), `voiceAgent.history.recordDrafts`.
+- Privacy disclosure updated for local transcript history retention and **Clear Transcript History**.
+
 ## 0.2.0 — 2026-07-18
 
 ### Trust & safety

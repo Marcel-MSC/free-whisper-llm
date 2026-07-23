@@ -23,12 +23,27 @@ These events **never** include audio, full transcripts, or file contents.
 
 API keys and Pro license keys are stored in **VS Code Secret Storage**, not in plain settings sync. A deprecated `voiceAgent.llm.apiKey` setting may be migrated once into Secret Storage and cleared.
 
+## Session history (Pro)
+
+With Pro **session history**, the extension may keep a **local** bounded list of:
+
+- Voice transcripts and typed prompts (including discarded drafts, when enabled)
+- Run outcomes (success, error, cancel) with short result previews
+
+This data lives in VS Code extension global state on your machine (not uploaded by Voice Agent). It is **not** raw audio. Controls:
+
+- Panel: **Show history** / **Load more** / click an item to reuse
+- Command: **Voice Agent: Clear History**
+- Settings: `voiceAgent.history.maxEntries`, `voiceAgent.history.recordDrafts`
+
 ## Your controls
 
 - Command: **Voice Agent: Show Privacy Notice**
 - Command: **Voice Agent: Reset Privacy Consent**
+- Command: **Voice Agent: Clear History**
 - Settings: LLM provider / base URL
 - Setting: `voiceAgent.analytics.enabled`
+- Settings: `voiceAgent.history.maxEntries`, `voiceAgent.history.recordDrafts`
 
 ## Contact
 
